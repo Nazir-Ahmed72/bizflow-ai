@@ -1,0 +1,21 @@
+# Web / API
+fastapi>=0.115
+uvicorn[standard]>=0.30
+
+# Database (Neon Postgres via psycopg 3)
+sqlalchemy>=2.0,<2.1
+psycopg[binary]>=3.2
+alembic>=1.13
+
+# Config / validation
+pydantic>=2.7
+python-dotenv>=1.0
+
+# Agent
+langgraph>=0.6
+langgraph-checkpoint-postgres>=2.0
+langchain-groq>=0.3
+
+# Tests
+pytest>=8.0
+httpx>=0.27
