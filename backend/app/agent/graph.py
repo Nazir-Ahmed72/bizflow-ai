@@ -20,6 +20,7 @@ Every customer message goes to the `agent` node first. There the LLM reads the m
       |      confirm_pending_order -> revalidate -> confirm -> invoice -> END             |
       |      cancel_pending_order -> cancel -> END                                        |
       |      request_cancel_confirmed_order -> cancel_handoff (human)                     |
+      |      report_payment -> payment (accounts team verifies later)                     |
       |      plain answer --------------------------------------------------------+       |
       |                                                                            v       v
       +------------------------ memory <-----------------------------------  wait_for_reply
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 from typing import Annotated, Any, Callable, Optional, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -47,9 +49,10 @@ from app.agent.llm import (
 )
 from app.agent.text import TASKS, backup, display, number_guard, stock_option_label
 from app.tools import (
-    ErrorCode, cancel_draft, check_stock, confirm_order, create_backorders, create_draft, generate_invoice,
-    get_customer_profile, get_order_history, get_prices, get_restock_eta, identify_customer, list_products,
-    log_context, log_event, notify_staff, recent_messages, run_reorder_check, search_products, suggest_alternatives,
+    PAY_TO, ErrorCode, cancel_draft, check_stock, confirm_order, create_backorders, create_draft, generate_invoice,
+    get_customer_profile, get_order_history, get_order_status, get_prices, get_restock_eta, identify_customer,
+    list_products, local_time_text, log_context, log_event, notify_staff, recent_messages, run_reorder_check,
+    search_products, submit_payment, suggest_alternatives,
 )
 
 MAX_TOOL_ROUNDS = 5
@@ -84,6 +87,7 @@ class OrderState(TypedDict, total=False):
     order: Optional[dict]
     invoice: Optional[dict]
     cancel_request: Optional[dict]  # args of request_cancel_confirmed_order
+    payment_request: Optional[dict]  # args of report_payment
     summary: Optional[str]
     summarized_until: int
     focus: list[dict]
@@ -96,7 +100,7 @@ class OrderState(TypedDict, total=False):
 ORDER_RESET: dict[str, Any] = {
     "requested": [], "items": [], "awaiting": None, "question": None, "base_question": None, "options": [],
     "choice_index": None, "choice": None, "pricing": None, "draft": None, "order": None, "invoice": None,
-    "cancel_request": None, "backorders": [],
+    "cancel_request": None, "payment_request": None, "backorders": [],
 }
 
 
@@ -187,6 +191,9 @@ def _memory_text(state: OrderState) -> str:
             parts.append(f"Language used last time: {profile['preferred_language']}.")
     else:
         parts.append("CUSTOMER HISTORY: no past orders.")
+    open_orders = (profile or {}).get("open_orders") or []
+    if open_orders:
+        parts.append("OPEN ORDERS (up to date): " + "; ".join(_open_order_text(o) for o in open_orders))
     if state.get("summary"):
         parts.append(f"CONVERSATION SUMMARY (older messages):\n{state['summary']}")
     focus = state.get("focus") or []
@@ -196,6 +203,22 @@ def _memory_text(state: OrderState) -> str:
             f"{f['name']} ({f['product_id']}" + (f", {f['pack']}" if f.get("pack") else "")
             + (f", {f['unit_price']} per pack" if f.get("unit_price") else "") + ")" for f in shown))
     return "\n".join(parts)
+
+
+def _parse_time(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _open_order_text(o: dict) -> str:
+    total = display({"total": o["total"]})["total"]
+    if o["status"] == "awaiting_payment":
+        review = {"pending_verification": ", payment reported and being verified by accounts",
+                  "rejected": ", last payment could not be verified"}.get(o.get("payment_status") or "", "")
+        due = local_time_text(_parse_time(o["payment_due_at"])) if o.get("payment_due_at") else "soon"
+        return f"{o['order_number']} waiting for payment ({total}, pay before {due}{review})"
+    if o["status"] == "ready_to_dispatch":
+        return f"{o['order_number']} paid ({total}), delivery on {o.get('delivery_date')}"
+    return f"{o['order_number']} {o['status']} ({total})"
 
 
 def _focus_from(tool_name: str, result: dict) -> list[dict]:
@@ -290,19 +313,19 @@ def build_graph(llm: OrderLLM, checkpointer=None):
         res = identify_customer(state["thread_id"])
         if not res.success:
             return Command(update={"customer": None}, goto="handoff")
-        profile = get_customer_profile(res.customer_id)
         return Command(update={"customer": {"customer_id": res.customer_id, "name": res.name, "address": res.address,
                                             "price_category": res.price_category,
-                                            "discount_pct": str(res.discount_pct)},
-                               "profile": profile.model_dump(mode="json") if profile.success else None},
+                                            "discount_pct": str(res.discount_pct)}},
                        goto="memory")
 
     @node("memory")
     def memory(state: OrderState):
+        fresh = get_customer_profile(state["customer"]["customer_id"])
+        profile = {"profile": fresh.model_dump(mode="json") if fresh.success else state.get("profile")}
         after = state.get("summarized_until") or 0
         rows = recent_messages(state["thread_id"], limit=200, after_id=after)
         if len(rows) <= SUMMARY_TRIGGER:
-            return Command(goto="agent")
+            return Command(update=profile, goto="agent")
         old = rows[:-KEEP_RECENT]
         transcript = "\n".join(f"{'Customer' if m['direction'] == 'in' else 'Bot'}: {m['text']}" for m in old)
         previous = state.get("summary") or ""
@@ -311,11 +334,11 @@ def build_graph(llm: OrderLLM, checkpointer=None):
                                            f"PREVIOUS SUMMARY:\n{previous or '(none)'}\n\nNEW MESSAGES:\n{transcript}"))
         except Exception as exc:
             guard("summary_written", False, reason=str(exc))
-            return Command(goto="agent")
+            return Command(update=profile, goto="agent")
         ok, reason = number_guard(previous + " " + transcript, summary)
         if not guard("summary_numbers", ok, reason=reason, summarized=len(old)):
-            return Command(goto="agent")
-        return Command(update={"summary": summary, "summarized_until": old[-1]["id"]}, goto="agent")
+            return Command(update=profile, goto="agent")
+        return Command(update={**profile, "summary": summary, "summarized_until": old[-1]["id"]}, goto="agent")
 
     @node("handoff")
     def handoff(state: OrderState):
@@ -338,6 +361,8 @@ def build_graph(llm: OrderLLM, checkpointer=None):
                 res = get_restock_eta(product_id=args.get("product_id", ""))
             elif name == "get_prices":
                 res = get_prices(customer_id=customer_id, items=args.get("items", []))
+            elif name == "get_order_status":
+                res = get_order_status(customer_id=customer_id, order_number=args.get("order_number"))
             else:  # get_order_history
                 res = get_order_history(customer_id=customer_id, limit=args.get("limit") or 5,
                                         order_number=args.get("order_number"))
@@ -471,7 +496,8 @@ def build_graph(llm: OrderLLM, checkpointer=None):
             # customer explicitly asks (request_cancel_confirmed_order).
             guard("nothing_pending_to_cancel", True)
             return keep_waiting_or_end(here, say(here, "nothing_to_cancel"), "done")
-        # request_cancel_confirmed_order
+        if name == "report_payment":
+            return Command(update={**base, "payment_request": args}, goto="payment")
         return Command(update={**base, "cancel_request": args}, goto="cancel_handoff")
 
     # ----------------------------------------------------------------- order steps (deterministic)
@@ -654,7 +680,8 @@ def build_graph(llm: OrderLLM, checkpointer=None):
                           product_ids=sorted({l["product_id"] for l in order["lines"]}
                                              | {b["product_id"] for b in backorders}))
         facts = {"order_number": order["order_number"], "invoice_number": res.invoice_number if res.success else "pending",
-                 "total": order["total"], "address": state["customer"]["address"]}
+                 "total": order["total"], "address": state["customer"]["address"],
+                 "pay_before": local_time_text(_parse_time(order["payment_due_at"])), "pay_to": PAY_TO}
         if backorders:
             facts["backorders"] = backorders
         text = say(state, "confirmed", facts, required=(order["total"], order["order_number"]))
@@ -682,11 +709,41 @@ def build_graph(llm: OrderLLM, checkpointer=None):
                               f"{order_number}. Reason: {req.get('reason') or state.get('message')}")
         return keep_waiting_or_end(state, say(state, "cancel_handoff", {"order_number": order_number}), "handed_off")
 
+    @node("payment")
+    def payment(state: OrderState):
+        """Customer reports an online payment. Only recorded here; a person in accounts verifies it later."""
+        req = state.get("payment_request") or {}
+        customer = state["customer"]
+        res = submit_payment(customer_id=customer["customer_id"], thread_id=state["thread_id"],
+                             method=req.get("method") or "bank_transfer", reference=str(req.get("reference") or ""),
+                             order_number=req.get("order_number") or None)
+        if res.success:
+            p = res.payment
+            facts = {"order_number": p.order_number, "total": str(p.amount), "reference": p.reference}
+            kind = "payment_already_submitted" if res.already_submitted else "payment_received"
+            return keep_waiting_or_end(state, say(state, kind, facts, required=(p.order_number,)), kind)
+        details = res.details or {}
+        if res.error_code == ErrorCode.ORDER_CANCELLED:
+            notify_staff("accounts", f"{customer['name']} ({state['thread_id']}) reports payment "
+                                     f"{req.get('reference')} for cancelled order {details.get('order_number')}: "
+                                     f"check for a refund or re-order.")
+        kinds = {ErrorCode.INVALID_INPUT: ("payment_reference_needed", {}),
+                 ErrorCode.NO_UNPAID_ORDER: ("no_unpaid_order", {}),
+                 ErrorCode.ORDER_NOT_FOUND: ("order_not_found", {"order_number": req.get("order_number")}),
+                 ErrorCode.ALREADY_PAID: ("already_paid", {"order_number": details.get("order_number"),
+                                                           "delivery_date": details.get("delivery_date")}),
+                 ErrorCode.ORDER_CANCELLED: ("order_cancelled_unpaid", {"order_number": details.get("order_number")}),
+                 ErrorCode.DUPLICATE_REFERENCE: ("duplicate_reference", {"reference": req.get("reference")})}
+        if res.error_code not in kinds:
+            return fail(state, f"submit_payment failed: {res.error_code} {res.message}")
+        kind, facts = kinds[res.error_code]
+        return keep_waiting_or_end(state, say(state, kind, facts), kind)
+
     # ----------------------------------------------------------------- wiring
 
     g = StateGraph(OrderState)
     for fn in (ingest, identify, memory, handoff, agent, resolve_products, apply_choice, check_stock_node, price, save_draft,
-               send_summary, wait_for_reply, revalidate, confirm, invoice, cancel, cancel_handoff):
+               send_summary, wait_for_reply, revalidate, confirm, invoice, cancel, cancel_handoff, payment):
         g.add_node(fn.__name__, fn)
     g.add_edge(START, "ingest")
     return g.compile(checkpointer=checkpointer)

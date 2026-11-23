@@ -8,16 +8,16 @@ Read-only (the LLM may call it): get_order_history
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import Session, selectinload
 
-from app.db.models import Invoice, Order, OrderDraft, OrderItem
+from app.db.models import Invoice, Order, OrderDraft, OrderItem, Payment
 from app.db.session import session_scope
 from app.tools.base import (
     Abort, ErrorCode, OrderLineIn, OrderLines, PricedLine, Pricing, ToolError, ToolOk, fail, tool,
@@ -25,6 +25,7 @@ from app.tools.base import (
 from app.tools.catalog import compute_pricing
 
 DRAFT_TTL = timedelta(hours=2)
+PAYMENT_WINDOW = timedelta(hours=24)
 Language = Literal["en", "ur", "roman_ur"]
 
 
@@ -119,6 +120,8 @@ class ConfirmOrderOutput(ToolOk):
     already_confirmed: bool  # True -> duplicate "yes": nothing created, send no message
     order_id: int
     order_number: str
+    status: str
+    payment_due_at: Optional[datetime]
     draft_id: uuid.UUID
     lines: list[PricedLine]
     subtotal: Decimal
@@ -129,7 +132,8 @@ class ConfirmOrderOutput(ToolOk):
 
 def _order_output(order: Order, already: bool) -> ConfirmOrderOutput:
     return ConfirmOrderOutput(
-        already_confirmed=already, order_id=order.id, order_number=order.order_number, draft_id=order.draft_id,
+        already_confirmed=already, order_id=order.id, order_number=order.order_number, status=order.status,
+        payment_due_at=order.payment_due_at, draft_id=order.draft_id,
         lines=[
             PricedLine(product_id=i.product_id, name=i.product_name, pack="", unit="", qty=i.qty,
                        unit_price=i.unit_price, line_total=i.line_total)
@@ -213,7 +217,8 @@ def confirm_order(p: ConfirmOrderInput) -> Union[ConfirmOrderOutput, ToolError]:
                 id=order_id, order_number=f"ORD-{order_id:06d}", draft_id=draft.id,
                 customer_id=draft.customer_id, idempotency_key=p.idempotency_key,
                 subtotal=pricing.subtotal, discount_pct=pricing.discount_pct,
-                discount_amount=pricing.discount_amount, total=pricing.total, status="confirmed",
+                discount_amount=pricing.discount_amount, total=pricing.total, status="awaiting_payment",
+                payment_due_at=_now() + PAYMENT_WINDOW,
                 items=[
                     OrderItem(product_id=pl.product_id, product_name=pl.name, qty=pl.qty,
                               unit_price=pl.unit_price, line_total=pl.line_total)
@@ -233,6 +238,18 @@ def confirm_order(p: ConfirmOrderInput) -> Union[ConfirmOrderOutput, ToolError]:
             if existing:
                 return _order_output(existing, already=True)
         raise
+
+
+def release_reservation(s: Session, order: Order) -> None:
+    for item in sorted(order.items, key=lambda i: i.product_id):
+        res = s.execute(
+            text("UPDATE inventory SET reserved = reserved - :qty, updated_at = now() "
+                 "WHERE product_id = :pid AND reserved >= :qty"),
+            {"qty": item.qty, "pid": item.product_id},
+        )
+        if res.rowcount != 1:
+            raise Abort(fail(ErrorCode.INTERNAL_ERROR,
+                             f"Reservation for {item.product_id} on {order.order_number} is missing."))
 
 
 # --------------------------------------------------------------------------- generate_invoice
@@ -366,6 +383,15 @@ class UsualItem(BaseModel):
     last_qty: int
 
 
+class OpenOrder(BaseModel):
+    order_number: str
+    status: str
+    total: Decimal
+    payment_due_at: Optional[datetime]
+    payment_status: Optional[str]
+    delivery_date: Optional[date]
+
+
 class GetCustomerProfileOutput(ToolOk):
     customer_id: int
     orders_count: int
@@ -373,6 +399,11 @@ class GetCustomerProfileOutput(ToolOk):
     last_order_at: Optional[datetime]
     usual_items: list[UsualItem]
     preferred_language: Optional[str]
+    open_orders: list[OpenOrder]
+
+
+def latest_payment_status(s: Session, order_id: int) -> Optional[str]:
+    return s.scalar(select(Payment.status).where(Payment.order_id == order_id).order_by(Payment.id.desc()).limit(1))
 
 
 @tool(GetCustomerProfileInput)
@@ -383,6 +414,10 @@ def get_customer_profile(p: GetCustomerProfileInput) -> Union[GetCustomerProfile
                                 .options(selectinload(Order.items)).order_by(Order.id.desc()).limit(50)))
         language = s.scalar(select(OrderDraft.language).where(OrderDraft.customer_id == p.customer_id)
                             .order_by(OrderDraft.created_at.desc()).limit(1))
+        open_orders = [OpenOrder(order_number=o.order_number, status=o.status, total=o.total,
+                                 payment_due_at=o.payment_due_at, payment_status=latest_payment_status(s, o.id),
+                                 delivery_date=o.delivery_date)
+                       for o in orders[:10] if o.status != "cancelled"][:5]
     stats: dict[str, dict] = {}
     for order in orders:
         for item in order.items:
@@ -396,4 +431,5 @@ def get_customer_profile(p: GetCustomerProfileInput) -> Union[GetCustomerProfile
         usual_items=[UsualItem(product_id=pid, name=e["name"], times_ordered=e["times"], last_qty=e["last_qty"])
                      for pid, e in usual],
         preferred_language=language,
+        open_orders=open_orders,
     )

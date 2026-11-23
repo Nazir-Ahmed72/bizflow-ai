@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -10,6 +10,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -20,6 +21,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -112,7 +114,7 @@ class Inventory(Base):
 # --------------------------------------------------------------------------- ordering
 
 DRAFT_STATUSES = ("pending", "confirmed", "cancelled", "expired")
-ORDER_STATUSES = ("confirmed", "cancelled", "fulfilled")
+ORDER_STATUSES = ("awaiting_payment", "ready_to_dispatch", "cancelled")
 
 
 class OrderDraft(Base):
@@ -161,8 +163,13 @@ class Order(Base):
     discount_pct: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
     discount_amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
     total: Mapped[Decimal] = mapped_column(Money, nullable=False)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="confirmed")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="awaiting_payment")
     created_at: Mapped[datetime] = _now_col()
+    payment_due_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    delivery_date: Mapped[Optional[date]] = mapped_column(Date)
+    cancelled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    cancel_reason: Mapped[Optional[str]] = mapped_column(Text)
 
     customer: Mapped[Customer] = relationship()
     items: Mapped[list["OrderItem"]] = relationship(back_populates="order", cascade="all, delete-orphan")
@@ -268,10 +275,12 @@ BACKORDER_STATUSES = ("waiting", "ready", "cancelled")
 
 class Supplier(Base):
     __tablename__ = "suppliers"
+    __table_args__ = (CheckConstraint("payment_terms_days >= 0", name="ck_suppliers_terms_nonneg"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
     phone: Mapped[str] = mapped_column(String(20), nullable=False)
+    payment_terms_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default="15")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     created_at: Mapped[datetime] = _now_col()
 
@@ -365,3 +374,78 @@ class Backorder(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="waiting")
     created_at: Mapped[datetime] = _now_col()
     ready_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
+PAYMENT_METHODS = ("bank_transfer", "jazzcash", "easypaisa")
+PAYMENT_STATUSES = ("pending_verification", "verified", "rejected")
+
+
+class Payment(Base):
+    __tablename__ = "payments"
+    __table_args__ = (
+        CheckConstraint(f"method IN {PAYMENT_METHODS}", name="ck_payments_method"),
+        CheckConstraint(f"status IN {PAYMENT_STATUSES}", name="ck_payments_status"),
+        CheckConstraint("amount > 0", name="ck_payments_amount_positive"),
+        Index("uq_payments_live_per_order", "order_id", unique=True,
+              postgresql_where=text("status IN ('pending_verification', 'verified')")),
+        Index("uq_payments_live_reference", "method", "reference", unique=True,
+              postgresql_where=text("status <> 'rejected'")),
+        Index("ix_payments_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), nullable=False, index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    method: Mapped[str] = mapped_column(String(20), nullable=False)
+    reference: Mapped[str] = mapped_column(String(60), nullable=False)
+    status: Mapped[str] = mapped_column(String(25), nullable=False, server_default="pending_verification")
+    submitted_at: Mapped[datetime] = _now_col()
+    reviewed_by: Mapped[Optional[str]] = mapped_column(String(80))
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    rejected_reason: Mapped[Optional[str]] = mapped_column(Text)
+
+    order: Mapped[Order] = relationship()
+    customer: Mapped[Customer] = relationship()
+
+
+SUPPLIER_INVOICE_STATUSES = ("awaiting_approval", "approved", "paid", "rejected")
+
+
+class SupplierInvoice(Base):
+    __tablename__ = "supplier_invoices"
+    __table_args__ = (
+        UniqueConstraint("supplier_id", "invoice_number", name="uq_supplier_invoices_supplier_number"),
+        CheckConstraint(f"status IN {SUPPLIER_INVOICE_STATUSES}", name="ck_supplier_invoices_status"),
+        CheckConstraint("match_status IN ('matched', 'mismatch')", name="ck_supplier_invoices_match"),
+        CheckConstraint("amount > 0 AND expected_amount >= 0", name="ck_supplier_invoices_amounts"),
+        CheckConstraint("difference = amount - expected_amount", name="ck_supplier_invoices_difference"),
+        CheckConstraint("due_date >= invoice_date", name="ck_supplier_invoices_due_after_invoice"),
+        Index("ix_supplier_invoices_status_due", "status", "due_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    supplier_id: Mapped[int] = mapped_column(ForeignKey("suppliers.id"), nullable=False)
+    purchase_order_id: Mapped[int] = mapped_column(ForeignKey("purchase_orders.id"), nullable=False, index=True)
+    invoice_number: Mapped[str] = mapped_column(String(40), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    expected_amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    difference: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    match_status: Mapped[str] = mapped_column(String(10), nullable=False)
+    invoice_date: Mapped[date] = mapped_column(Date, nullable=False)
+    due_date: Mapped[date] = mapped_column(Date, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="awaiting_approval")
+    recorded_by: Mapped[str] = mapped_column(String(80), nullable=False)
+    recorded_at: Mapped[datetime] = _now_col()
+    approved_by: Mapped[Optional[str]] = mapped_column(String(80))
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    override_reason: Mapped[Optional[str]] = mapped_column(Text)
+    rejected_by: Mapped[Optional[str]] = mapped_column(String(80))
+    rejected_reason: Mapped[Optional[str]] = mapped_column(Text)
+    paid_by: Mapped[Optional[str]] = mapped_column(String(80))
+    paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    payment_reference: Mapped[Optional[str]] = mapped_column(String(60))
+
+    supplier: Mapped[Supplier] = relationship()
+    purchase_order: Mapped[PurchaseOrder] = relationship()

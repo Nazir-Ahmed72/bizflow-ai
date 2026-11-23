@@ -198,7 +198,75 @@ waits for this person's reply"; use a status for "this record waits for someone 
 
 ---
 
-## 11. Testing an LLM app
+## 11. Money in and money out (payments)
+
+**Idea.** §10 was the "procure" half of procure-to-pay. This section adds the money: customers paying us
+(*accounts receivable*) and us paying suppliers (*accounts payable*). The rule of thumb: **software proposes,
+records and reminds; a person moves or confirms money.** Neither the LLM nor any automatic step decides that
+money has arrived or should leave.
+
+**Concepts, and where they live** ([payments.py](../backend/app/tools/payments.py),
+[payables.py](../backend/app/tools/payables.py), [finance.py](../backend/app/api/finance.py)):
+
+| Concept | What it means | In this project |
+|---|---|---|
+| **Advance payment** | Goods leave only after money arrives | `orders.status`: `awaiting_payment` → `ready_to_dispatch` |
+| **Separate status per question** | "Is it paid?" and "where is the order?" change at different times | `payments.status` (pending_verification / verified / rejected) next to `orders.status` |
+| **Payment claim vs payment** | "I paid, TID 784512" is a *claim* until someone checks the bank | `submit_payment` stores a claim; `verify_payment` makes it real |
+| **Amount from the system, not the customer** | The customer can't type the amount | `report_payment` has no amount field; `payments.amount = orders.total` |
+| **Reconciliation** | Matching our records against the bank statement | the accountant's verify / reject step |
+| **Deadline + release** | Unpaid orders shouldn't hold stock forever | `cancel_unpaid_orders` (job `payment-deadline`): reserved −= qty, order cancelled |
+| **Three-way match** | Purchase order × goods receipt × supplier invoice must agree | `record_supplier_invoice`: owed = qty received × agreed cost; anything else is `mismatch` |
+| **Payment terms / due date** | "Net 15": pay within 15 days of the invoice | `suppliers.payment_terms_days` → `due_date`, `overdue` in the list |
+| **Maker-checker (four eyes)** | One person records, another approves, a third pays | `SAME_PERSON` errors in approve / pay |
+| **Duplicate-payment controls** | The same bill or bank transfer must never count twice | unique (supplier, invoice_number); partial unique index on payment references |
+
+**Your scenario: the accountant is busy and the customer has left.** Three design choices make this work:
+1. *The claim protects the order.* The deadline job only cancels orders with **no** pending or verified payment.
+   A customer who paid on time is never punished for a slow accountant; instead the job reminds accounts about
+   claims older than 2 hours.
+2. *The system messages first (a proactive message).* `verify_payment` writes the customer's message in the
+   **same transaction** as the status change. Either both happen or neither: the customer is never told
+   "paid" for an order that isn't, and never misses the message for one that is. This is the
+   **transactional outbox** pattern: a real WhatsApp sender would later read unsent rows from `messages` and
+   deliver them.
+3. *The agent re-reads the truth every turn.* The `memory` node reloads the customer profile, including
+   `OPEN ORDERS` with payment status, so when the customer comes back hours later the LLM already knows the
+   order is paid and when it will arrive.
+
+**Two database ideas worth noticing.**
+- *Partial unique index:* `UNIQUE (order_id) WHERE status IN ('pending_verification','verified')` means "at most
+  one live payment per order", while rejected attempts can pile up as history. A plain UNIQUE couldn't say that.
+- *Check-then-act under a lock:* the deadline job locks each order `FOR UPDATE`, then checks again that no payment
+  arrived. `submit_payment` locks the same row first, so a payment reported at the last second and the
+  cancellation can't both win. (Same idea as `_transition()` in §10.)
+
+**Time zones.** Deadlines are stored in UTC (`timestamptz`), but "before 2 PM" means 2 PM in Karachi.
+Pakistan has no daylight saving, so a fixed `UTC+5` works without the `tzdata` package (Windows has no built-in
+time-zone database for `zoneinfo`).
+
+**Changing a CHECK constraint (migration lesson).** Autogenerate doesn't notice CHECK changes. The migration
+`ebe90ceec433` does it by hand, in the only safe order: drop the old constraint → move existing rows to new values
+(`confirmed` → `ready_to_dispatch`) → add the new constraint. The downgrade does the reverse.
+
+**Why a gateway would change only one step.** A payment gateway (JazzCash, Easypaisa, Stripe) calls your server
+when money arrives (a **webhook**), signed with a secret so you can prove it came from them. In this design the
+webhook would simply call `verify_payment` with `verified_by="gateway"`; everything after it stays the same.
+
+**Read.**
+- Accounts receivable: https://en.wikipedia.org/wiki/Accounts_receivable
+- Accounts payable and the three-way match: https://en.wikipedia.org/wiki/Accounts_payable
+- Bank reconciliation: https://en.wikipedia.org/wiki/Bank_reconciliation
+- Four-eyes principle: https://en.wikipedia.org/wiki/Two-man_rule
+- Transactional outbox pattern: https://microservices.io/patterns/data/transactional-outbox.html
+- PostgreSQL partial indexes: https://www.postgresql.org/docs/current/indexes-partial.html
+- `SELECT ... FOR UPDATE` row locks: https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS
+- Webhooks and signature checks (Stripe's explanation is clear even if you never use Stripe): https://docs.stripe.com/webhooks
+- Python `datetime` and time zones: https://docs.python.org/3.10/library/datetime.html#aware-and-naive-objects
+
+---
+
+## 12. Testing an LLM app
 
 **Idea.** You can't test "is the model smart?" with exact assertions, but you *can* test everything around it. The scenario tests use a **scripted fake LLM** that says "for 'yes', call `confirm_pending_order`". Everything after that decision is real code on a real (test) database. A separate live test checks the real model, only when you ask (`RUN_LIVE_LLM=1`), because it costs tokens.
 

@@ -6,6 +6,7 @@ from typing import Iterator, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
+from sqlalchemy.orm import Session
 
 from app.db.models import Message, StaffNotification
 from app.db.session import get_engine, session_scope
@@ -35,7 +36,7 @@ def conversation_lock(thread_id: str) -> Iterator[None]:
 
 
 class NotifyStaffInput(BaseModel):
-    role: Literal["sales", "warehouse", "manager"]
+    role: Literal["sales", "warehouse", "manager", "accounts"]
     reason: str = Field(min_length=1, max_length=1000)
 
 
@@ -57,12 +58,14 @@ def notify_staff(p: NotifyStaffInput) -> Union[NotifyStaffOutput, ToolError]:
 
 
 def record_message(thread_id: str, direction: Literal["in", "out"], text: str,
-                   customer_id: Optional[int] = None) -> int:
-    with session_scope() as s:
+                   customer_id: Optional[int] = None, session: Optional[Session] = None) -> int:
+    if session is not None:
         m = Message(thread_id=thread_id, direction=direction, text=text, customer_id=customer_id)
-        s.add(m)
-        s.flush()
+        session.add(m)
+        session.flush()
         return m.id
+    with session_scope() as s:
+        return record_message(thread_id, direction, text, customer_id, session=s)
 
 
 def recent_messages(thread_id: str, limit: int = 10, after_id: int = 0) -> list[dict]:

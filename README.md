@@ -2,7 +2,8 @@
 
 **An AI order assistant for wholesale FMCG and grocery distributors.**
 Shopkeepers message their orders the way they already do (in English, Urdu or Roman Urdu), and BizFlow AI turns
-those messages into confirmed, priced, stock-checked orders with invoices.
+those messages into priced, stock-checked orders with invoices, collects payment, and keeps the warehouse,
+accounts and suppliers in step.
 
 ```
 Customer: bhai 10 carton dalda aur 5 sooper bhej do
@@ -14,7 +15,13 @@ Bot:      Madina General Store, aap ka order:
 Customer: ek carton mein kitni bottles hoti hain?
 Bot:      Ek carton mein 12 bottle hoti hain.
 Customer: haan theek hai, bhej do
-Bot:      Aap ka order confirm ho gaya. Order ORD-000001, invoice INV-000001, total Rs 62,230.
+Bot:      Order ORD-000001 place ho gaya, stock aap ke liye reserve hai. Rs 62,230 Meezan Bank ya
+          JazzCash/Easypaisa par 24 ghante mein bhej kar transaction ID yahan bhej dein.
+Customer: bhej diya, TID 784512
+Bot:      Shukriya! Accounts team payment check kar rahi hai, confirm hote hi aap ko message aa jayega.
+          ... (later, after the accountant checks the bank statement) ...
+Bot:      Order ORD-000001 ki payment Rs 62,230 mil gayi hai. Aap ka order confirm ho gaya hai aur aaj
+          (24 Nov) Liaquatabad No. 10 par deliver hoga. Shukriya!
 ```
 
 ---
@@ -29,6 +36,8 @@ A distributor in Karachi serves hundreds of small shops. Orders arrive all day a
 - check whether there is enough stock, and offer alternatives when there isn't
 - apply each shop's discount and calculate the bill
 - confirm with the shop, then enter the order, reserve the stock and issue an invoice
+- chase the payment, match it against the bank statement, and only then release the goods
+- pay suppliers the right amount, only for goods that actually arrived
 
 This is slow, error-prone and doesn't scale. A wrong total, a double-booked order or overselling stock costs
 money and trust.
@@ -61,6 +70,11 @@ the AI.
 | **Keeps a manager in the loop**: every purchase order needs approval | draft → approved → sent → received |
 | **Offers backorders** when new stock is on its way | "18 now, the other 12 when stock arrives (about 1 day)" |
 | **Tells customers when stock returns** | "when will Tapal be back?" |
+| **Collects payment before dispatch** (online: bank transfer, JazzCash, Easypaisa) | pay within 24 hours, reference = order number |
+| **An accountant verifies every payment** against the bank statement | the customer is messaged the moment it is verified, even if they left the chat |
+| **Cancels unpaid orders** after 24 hours and frees the reserved stock | reported payments are never cancelled while accounts is busy |
+| **Schedules delivery** | paid before 2 PM: delivered the same day; otherwise the next day |
+| **Pays suppliers safely**: invoice checked against what was ordered and received | billed for 62 cartons, received 60 → flagged |
 | **Logs everything** | every AI decision, tool call and safety check, with timing |
 
 ## What it guarantees
@@ -70,6 +84,9 @@ the AI.
 - **No overselling:** stock is reserved atomically, even when several shops confirm at the same moment.
 - **No double orders:** repeated or simultaneous confirmations produce exactly one order.
 - **No silent failures:** success is reported only after the order and invoice really exist.
+- **No dispatch without verified payment:** a person checks every payment; the amount always comes from the order.
+- **No paying twice or for missing goods:** supplier invoices are matched against receipts, and recording,
+  approving and paying are done by three different people.
 
 ---
 
@@ -82,6 +99,8 @@ flowchart TB
     subgraph Clients
         CLI["CLI chat"]
         API["REST API<br/>POST /chat"]
+        Staff["Staff endpoints<br/>manager, accounts, storekeeper"]
+        Jobs["Scheduled jobs<br/>reorder check, payment deadline"]
         Future["WhatsApp / voice<br/>(planned)"]
     end
 
@@ -93,8 +112,8 @@ flowchart TB
     end
 
     subgraph Tools["Business tools"]
-        Read["Look-ups<br/>products, stock, prices, order history"]
-        Write["Actions<br/>drafts, confirm order, invoice, notify staff"]
+        Read["Look-ups<br/>products, stock, prices, order history, order status"]
+        Write["Actions<br/>drafts, confirm order, invoice, payment claims, notify staff"]
     end
 
     subgraph DB["PostgreSQL"]
@@ -111,6 +130,8 @@ flowchart TB
     Graph --> Guards
     LLM -- "may look up" --> Read
     Graph -- "only the workflow acts" --> Write
+    Staff --> Write
+    Jobs --> Write
     Graph --> Read
     Read --> Business
     Write --> Business
@@ -152,7 +173,9 @@ flowchart TD
     check -- no --> agent
     check -- yes --> reval[re-check stock + prices]
     reval -- changed --> stock
-    reval --> confirm[create order<br/>reserve stock] --> invoice[issue invoice] --> done
+    reval --> confirm[create order<br/>reserve stock] --> invoice["issue invoice<br/>+ payment instructions"] --> done
+
+    agent -- "customer sends<br/>transaction ID" --> pay["record payment claim<br/>notify accounts"] --> done
 
     agent -- cancel pending order --> cancel[cancel draft] --> done
     agent -- "cancel a confirmed order /<br/>question for staff" --> human[notify staff] --> done
@@ -181,7 +204,7 @@ sequenceDiagram
     A->>DB: one transaction: create order, reserve stock for every line
     DB-->>A: order created (or nothing at all if any line fails)
     A->>DB: issue invoice
-    A-->>C: "Order ORD-000001 confirmed, invoice INV-000001, total Rs 62,230"
+    A-->>C: "Order ORD-000001 placed, invoice INV-000001, please pay Rs 62,230 within 24 hours"
     C->>A: "haan" (again)
     A-->>C: (nothing: the order already exists)
 ```
@@ -226,6 +249,62 @@ stateDiagram-v2
 
 ---
 
+## Getting paid
+
+Payment is online and in advance. The bot never decides that money has arrived: a person in accounts checks the
+bank statement. Because that can take hours, the customer doesn't have to stay in the chat; the system messages
+them as soon as the payment is verified.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Customer
+    participant B as Order agent
+    participant A as Accountant
+    participant J as Deadline job
+
+    C->>B: "yes"
+    B-->>C: Order placed, stock reserved. Pay Rs 62,230 to the bank account<br/>(reference ORD-000001) within 24 hours
+    C->>B: "paid, TID 784512"
+    B->>B: record the claim (amount taken from the order)
+    B->>A: notification: verify payment
+    B-->>C: Thanks, we're verifying it, we'll message you
+    Note over C: customer leaves the chat
+    A->>B: verify (checked the bank statement)
+    B-->>C: Payment received, order confirmed,<br/>delivered today (paid before 2 PM) or tomorrow
+    Note over J: every hour: unpaid after 24 hours and no payment reported?<br/>cancel the order and free the stock
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> awaiting_payment: customer says yes (stock reserved)
+    awaiting_payment --> ready_to_dispatch: accountant verifies the payment
+    awaiting_payment --> awaiting_payment: payment rejected, customer sends a new ID
+    awaiting_payment --> cancelled: no payment reported within 24 hours (stock released)
+    ready_to_dispatch --> [*]: delivery (next)
+    cancelled --> [*]
+```
+
+## Paying suppliers
+
+A supplier is paid only for what we ordered **and** received, and only after a manager approves.
+
+```mermaid
+flowchart LR
+    recv[goods received<br/>against a purchase order] --> rec["clerk records the<br/>supplier's invoice"]
+    rec --> match{"three-way match<br/>order · receipt · invoice"}
+    match -- matches --> approve["manager approves<br/>(not the clerk)"]
+    match -- "billed more than received" --> flag{manager}
+    flag -- "reject: ask for a<br/>corrected invoice" --> rec
+    flag -- "approve with a<br/>written reason" --> approve
+    approve --> pay["accountant records the payment<br/>(not the approver)"]
+    pay --> done[(paid, supplier informed)]
+```
+
+Each supplier has payment terms (e.g. 15 days), so every invoice has a due date and overdue bills stand out.
+
+---
+
 ## Memory
 
 The assistant keeps track of the conversation at several levels, so customers can talk naturally.
@@ -234,7 +313,7 @@ The assistant keeps track of the conversation at several levels, so customers ca
 flowchart LR
     subgraph Context["What the assistant knows on every message"]
         P1["Pending<br/>what it is waiting for"]
-        P2["Customer history<br/>usual items, last order"]
+        P2["Customer history<br/>usual items, last order,<br/>open orders + payment status"]
         P3["Conversation summary<br/>older messages, compressed"]
         P4["Currently discussing<br/>products in focus"]
         P5["Recent messages"]
@@ -265,6 +344,7 @@ erDiagram
     ORDER_DRAFTS ||--o| ORDERS : "becomes (on yes)"
     ORDERS ||--|{ ORDER_ITEMS : contains
     ORDERS ||--o| INVOICES : billed_by
+    ORDERS ||--o{ PAYMENTS : "paid by"
     PRODUCTS ||--|| INVENTORY : stocked_as
     PRODUCTS ||--o{ ORDER_ITEMS : "price snapshot"
 
@@ -304,6 +384,18 @@ erDiagram
         string order_number UK
         uuid draft_id UK
         numeric total
+        string status
+        timestamp payment_due_at
+        date delivery_date
+    }
+    PAYMENTS {
+        int id PK
+        int order_id FK
+        numeric amount
+        string method
+        string reference
+        string status
+        string reviewed_by
     }
     ORDER_ITEMS {
         int id PK
@@ -328,11 +420,22 @@ erDiagram
     PURCHASE_ORDERS ||--|{ PURCHASE_ORDER_ITEMS : contains
     PRODUCTS ||--o{ PURCHASE_ORDER_ITEMS : restocks
     ORDERS ||--o{ BACKORDERS : "rest delivered later"
+    PURCHASE_ORDERS ||--o{ SUPPLIER_INVOICES : "billed by"
 
     SUPPLIERS {
         int id PK
         string name UK
         string phone
+        int payment_terms_days
+    }
+    SUPPLIER_INVOICES {
+        int id PK
+        string invoice_number
+        numeric amount
+        numeric expected_amount
+        string match_status
+        date due_date
+        string status
     }
     SUPPLIER_PRODUCTS {
         int supplier_id FK
@@ -426,8 +529,13 @@ Karachi Mart `+92 345 2201876` (no discount), Madina General Store `+92 312 4478
 | `POST` | `/staff/reorder-check` | check all products now and draft purchase orders |
 | `GET` | `/staff/purchase-orders?status=draft` | purchase orders, optionally by status |
 | `POST` | `/staff/purchase-orders/{po}/approve` · `/reject` · `/send` · `/receive` | the manager and storekeeper steps |
+| `GET` | `/staff/payments?status=pending_verification` | customer payments waiting for an accountant |
+| `POST` | `/staff/payments/{payment}/verify` · `/reject` | the accountant's decision (the customer is messaged); `{payment}` = payment number, order number or the customer's transaction ID |
+| `POST` | `/staff/payments/cancel-unpaid` | run the 24-hour payment deadline now |
+| `GET` / `POST` | `/staff/supplier-invoices` | list supplier bills (due, overdue) / record a supplier's invoice |
+| `POST` | `/staff/supplier-invoices/{id}/approve` · `/reject` · `/pay` | manager approval and recording the payment |
 
-The daily check can also run as a scheduled job: `python -m app.jobs reorder-check`.
+Scheduled jobs: `python -m app.jobs reorder-check` (daily) and `python -m app.jobs payment-deadline` (hourly).
 
 ```json
 POST /chat
@@ -449,7 +557,7 @@ POST /chat
 
 - WhatsApp Business integration
 - Phone orders by voice (Vapi)
-- Delivery: assigning an available rider, pickup and proof of delivery
-- Payments: cash on delivery, advance payment verification, credit limits, paying suppliers
+- Delivery: assigning riders by area and workload, pickup, failed-delivery retries
+- Payment gateway (automatic verification), cash on delivery and credit limits
 - Staff dashboard: orders, stock, conversations, notifications
 - Deployment

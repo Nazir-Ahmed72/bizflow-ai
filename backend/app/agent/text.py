@@ -94,8 +94,27 @@ TASKS = {
                       "and ask them to reply with the number.",
     "stock_choice": "Say only 'available' units of the product are in stock (they asked for 'requested'); list the "
                     "numbered options exactly and ask them to reply with the number.",
-    "confirmed": "Tell them the order is confirmed: order number, invoice number, total, delivery address. If "
-                 "'backorders' is present, say we will message them when those items are back in stock. Thank them.",
+    "confirmed": "Tell them order order_number is placed and the stock is reserved for them (invoice number, total). "
+                 "Ask them to pay the total online before pay_before to the account in pay_to (bank account, or the "
+                 "JazzCash/Easypaisa number) with the order number as reference, and then send the transaction ID "
+                 "here. Say we dispatch to the address after our accounts team verifies the payment and we will "
+                 "message them then. If 'backorders' is present, say we will message them when those items are back "
+                 "in stock. Thank them.",
+    "payment_received": "Thank them: we received their payment details (reference) for order_number (total). Our "
+                        "accounts team is verifying it; they will get a message here as soon as it is verified, "
+                        "with the delivery day. They do not need to wait in the chat.",
+    "payment_already_submitted": "Say their payment (reference) for order_number is already with our accounts team "
+                                 "for verification; they will get a message as soon as it is verified.",
+    "already_paid": "Say order_number is already paid; it will be delivered on delivery_date (if given).",
+    "no_unpaid_order": "Say they have no order waiting for payment. If they paid for something else, ask for the "
+                       "order number.",
+    "order_cancelled_unpaid": "Say order_number was cancelled because it was not paid in time, so the payment cannot "
+                              "be applied to it; our team has been told and will contact them about the money. They "
+                              "can place a new order any time.",
+    "duplicate_reference": "Say this transaction reference was already used for another payment, so we cannot accept "
+                           "it again; ask them to check and send the correct transaction ID.",
+    "payment_reference_needed": "Ask them to send the transaction ID / reference of their payment so our accounts team "
+                                "can verify it.",
     "cancelled": "Tell them the pending order has been cancelled and they can order again any time.",
     "unknown_customer": "Their number is not registered, so no order can be placed; the sales team has been informed "
                         "and will contact them.",
@@ -140,8 +159,30 @@ BACKUP = {
         (f"Sorry, {f['name']} is out of stock." if f["available"] <= 0 else
          f"Sorry, only {f['available']} of {f['name']} are available (you asked for {f['requested']}).")
         + "\n" + _numbered(o["label"] for o in f["options"]) + "\nReply with the number."),
-    "confirmed": lambda f: (f"Thank you! Your order {f['order_number']} is confirmed. Invoice {f['invoice_number']}, "
-                            f"total {rs(f['total'])}. Delivery to: {f['address']}."),
+    "confirmed": lambda f: (
+        f"Thank you! Order {f['order_number']} is placed and the stock is reserved for you. Invoice "
+        f"{f['invoice_number']}, total {rs(f['total'])}.\nPlease pay {rs(f['total'])} online before {f['pay_before']}: "
+        f"{f['pay_to']['bank']}, account title {f['pay_to']['account_title']}, account {f['pay_to']['account_number']} "
+        f"(or JazzCash/Easypaisa {f['pay_to']['jazzcash_easypaisa']}), reference {f['order_number']}. Then send us the "
+        f"transaction ID.\nWe dispatch to {f['address']} once our accounts team verifies your payment; we will "
+        f"message you then."),
+    "payment_received": lambda f: (f"Thank you! We received your payment details (reference {f['reference']}) for "
+                                   f"{f['order_number']} ({rs(f['total'])}). Our accounts team is verifying it and we "
+                                   f"will message you here as soon as it is verified. No need to wait in the chat."),
+    "payment_already_submitted": lambda f: (f"Your payment (reference {f['reference']}) for {f['order_number']} is "
+                                            f"already with our accounts team. We will message you as soon as it is "
+                                            f"verified."),
+    "already_paid": lambda f: (f"Order {f['order_number']} is already paid"
+                               + (f" and will be delivered on {f['delivery_date']}." if f.get("delivery_date") else ".")),
+    "no_unpaid_order": lambda f: ("You don't have an order waiting for payment. If you paid for an order, please send "
+                                  "its order number."),
+    "order_cancelled_unpaid": lambda f: (f"Order {f['order_number']} was cancelled because it was not paid in time, so "
+                                         f"we can't apply this payment to it. Our team has been informed and will "
+                                         f"contact you. You can place a new order any time."),
+    "duplicate_reference": lambda f: (f"The transaction reference {f['reference']} was already used for another "
+                                      f"payment. Please check and send the correct transaction ID."),
+    "payment_reference_needed": lambda f: ("Please send the transaction ID of your payment so our accounts team can "
+                                           "verify it."),
     "cancelled": lambda f: "Okay, your pending order has been cancelled. You can order again any time.",
     "unknown_customer": lambda f: ("This number is not registered with us, so I can't place an order. "
                                    "Our sales team has been informed and will contact you."),

@@ -46,9 +46,9 @@ MAX_LEVELS = {"P-001": 160, "P-002": 120, "P-003": 80, "P-004": 70, "P-005": 40,
               "P-008": 40}
 
 SUPPLIERS = [
-    ("Karachi Wholesale Co.", "+92 21 3456 7890"),
-    ("Metro Supply", "+92 21 3111 2222"),
-    ("Sindh Traders", "+92 22 2765 4321"),
+    ("Karachi Wholesale Co.", "+92 21 3456 7890", 15),
+    ("Metro Supply", "+92 21 3111 2222", 7),
+    ("Sindh Traders", "+92 22 2765 4321", 30),
 ]
 
 SUPPLIER_PRODUCTS = [
@@ -71,7 +71,7 @@ SUPPLIER_PRODUCTS = [
 ]
 
 TRANSACTIONAL_TABLES = [
-    "backorders", "purchase_order_items", "purchase_orders",
+    "supplier_invoices", "payments", "backorders", "purchase_order_items", "purchase_orders",
     "invoices", "order_items", "orders", "order_drafts",
     "staff_notifications", "workflow_logs", "messages",
 ]
@@ -136,7 +136,8 @@ def seed(reset: bool = False) -> None:
             # Keep live stock/reservations; only fill in missing rows + reorder levels.
             _upsert(s, Inventory, inv_rows, ["product_id"], update_cols=["reorder_level", "max_level"])
 
-        _upsert(s, Supplier, [{"name": n, "phone": p, "is_active": True} for n, p in SUPPLIERS], ["name"])
+        _upsert(s, Supplier, [{"name": n, "phone": p, "payment_terms_days": t, "is_active": True}
+                         for n, p, t in SUPPLIERS], ["name"])
         supplier_ids = dict(s.execute(text("SELECT name, id FROM suppliers")).all())
         _upsert(s, SupplierProduct, [
             {"supplier_id": supplier_ids[name], "product_id": pid, "priority": prio, "unit_cost": Decimal(cost),

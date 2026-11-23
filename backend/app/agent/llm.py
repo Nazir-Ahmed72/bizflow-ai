@@ -54,6 +54,9 @@ READ_TOOLS = [
     _fn("get_order_history", "This customer's confirmed orders, newest first, or one order by number.",
         {"limit": {"type": ["integer", "null"], "minimum": 1, "maximum": 20},
          "order_number": {"type": ["string", "null"], "description": "e.g. ORD-000004"}}, []),
+    _fn("get_order_status", "Where an order is now: payment status, where and before when to pay, delivery date. "
+        "Use it for 'has my payment arrived?', 'when will my order come?', 'how do I pay?'. Latest order if no number.",
+        {"order_number": {"type": ["string", "null"], "description": "e.g. ORD-000004"}}, []),
 ]
 
 ACTION_TOOLS = [
@@ -78,6 +81,12 @@ ACTION_TOOLS = [
     _fn("request_cancel_confirmed_order", "The customer wants to cancel an order that is ALREADY confirmed. "
         "A human will handle it.", {"order_number": {"type": ["string", "null"]}, "reason": {"type": "string"},
                                     "language": _LANGUAGE}, ["reason", "language"]),
+    _fn("report_payment", "The customer says they have paid an order online and gives the transaction ID / "
+        "reference. Our accounts team then verifies it. Do NOT call it without a transaction ID.",
+        {"reference": {"type": "string", "description": "Transaction ID / reference exactly as the customer wrote it"},
+         "method": {"type": ["string", "null"], "enum": ["bank_transfer", "jazzcash", "easypaisa", None]},
+         "order_number": {"type": ["string", "null"], "description": "Only if the customer names one, e.g. ORD-000004"},
+         "language": _LANGUAGE}, ["reference", "language"]),
     _fn("forward_to_staff", "Pass a question you cannot answer from the tools or BUSINESS FACTS (fees, policies, "
         "delivery times, complaints, special requests) to the team.",
         {"question": {"type": "string"}, "language": _LANGUAGE}, ["question", "language"]),
@@ -109,10 +118,16 @@ BUSINESS FACTS (the only policies you may state)
 - Nothing is ordered until the customer says yes to an order summary; a summary is valid for 2 hours.
 - Confirmed orders cannot be changed or cancelled by you; cancellation requests go to our team, who decide any
   fees. Orders are delivered to the customer's registered address.
+- Payment is online and in advance only: bank transfer, JazzCash or Easypaisa (account details: get_order_status).
+  No cash on delivery and no credit. After the customer says yes, the stock is reserved for 24 hours; an order
+  without a reported payment by then is cancelled automatically.
+- Our accounts team verifies every payment by hand, and the system messages the customer when it is verified.
+  You never say a payment is received or verified yourself.
+- Paid orders are delivered the same day if the payment is verified before 2 PM, otherwise the next day.
 
 HOW TO WORK
 - Use the read-only tools (list_products, search_products, check_stock, suggest_alternatives, get_prices,
-  get_restock_eta, get_order_history) to answer questions. NEVER calculate prices, totals, discounts, counts or stock yourself:
+  get_restock_eta, get_order_history, get_order_status) to answer questions. NEVER calculate prices, totals, discounts, counts or stock yourself:
   every number you write must come from a tool result or the conversation. For any total, call get_prices.
 - Only state facts from tool results or BUSINESS FACTS. Never invent policies, fees, delivery times or offers;
   use forward_to_staff for anything else.
@@ -120,7 +135,8 @@ HOW TO WORK
   place_order (customer wants products), choose_option (customer picks a numbered option of the pending
   question), confirm_pending_order (customer clearly says yes to the pending summary), cancel_pending_order
   (customer says no/cancel to what is pending), request_cancel_confirmed_order (customer wants to cancel an order
-  that is already confirmed), forward_to_staff (question you cannot answer).
+  that is already confirmed), report_payment (customer paid and sends the transaction ID; if they say they paid
+  without an ID, ask for it), forward_to_staff (question you cannot answer).
 - A message asking for different products or quantities is a new place_order, NOT a confirmation.
 - You cannot create, change or cancel confirmed orders yourself, and you never say an order is placed or
   confirmed: the system does that and tells the customer.

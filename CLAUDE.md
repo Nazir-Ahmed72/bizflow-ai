@@ -59,7 +59,7 @@ Run everything from `backend/` with the venv active.
 | price_lists | price_category → discount_pct (A 3%, B 2%, C 0%) |
 | inventory | product_id, physical, reserved, reorder_level; available = physical − reserved |
 | order_drafts | customer, items JSON, totals, status, `expires_at` = summary time + 2h |
-| orders | draft_id, customer, totals, status, `idempotency_key` UNIQUE |
+| orders | draft_id, customer, totals, status (awaiting_payment / ready_to_dispatch / cancelled), `idempotency_key` UNIQUE, payment_due_at, paid_at, delivery_date, cancel_reason |
 | order_items | order_id, product_id, qty, unit_price snapshot, line_total |
 | invoices | order_id UNIQUE, invoice number, amounts |
 | workflow_logs | every LLM call, tool call and guard check: thread_id, step, kind, input/output JSON, duration_ms, success |
@@ -87,6 +87,8 @@ The 8 from the spec plus `get_order_history` (read-only) and the draft helpers.
 | `suggest_alternatives(product_id, qty_needed)` | catalog.py | **read, LLM may call** |
 | `get_prices(customer_id, items)` → subtotal, discount, total | catalog.py | **read, LLM may call** (customer_id injected by agent) |
 | `get_order_history(customer_id, limit, order_number)` | orders.py | **read, LLM may call** (customer_id injected; returns `count`) |
+| `get_order_status(customer_id, order_number?)` | payments.py | **read, LLM may call** (status, payment status, pay_to, pay_before, delivery date, `meaning`) |
+| `submit_payment` | payments.py | write, graph node `payment` only |
 | `create_draft`, `cancel_draft` | orders.py | write, graph nodes only |
 | `confirm_order(draft_id, idempotency_key)` | orders.py | write, graph nodes only |
 | `generate_invoice(order_id)` | orders.py | write, graph nodes only |
@@ -134,6 +136,7 @@ Products:
   - `cancel_pending_order` → cancel (agent cancels the draft). Nothing pending → reply `nothing_to_cancel` (NEVER escalates by itself)
   - `request_cancel_confirmed_order(order_number?, reason)` → cancel_handoff: **never cancels**, calls notify_staff("sales") and tells the customer a human will handle it. Only when the customer explicitly asks.
   - `forward_to_staff(question)` → notify_staff("sales"); for policies/fees/delivery times not in BUSINESS FACTS (the LLM must not invent them)
+  - `report_payment(reference, method?, order_number?)` → payment node → `submit_payment` (no amount param: amount = order total). Replies: payment_received / payment_already_submitted / already_paid / no_unpaid_order / order_cancelled_unpaid (+ accounts notified) / duplicate_reference / payment_reference_needed. Keeps a pending summary waiting.
 - `AGENT_SYSTEM` contains BUSINESS FACTS (wholesale, whole packs only, 2h summary validity, confirmed-order cancellations go to staff). Optional tool params are nullable (`["string","null"]`): Groq validates tool calls strictly.
 - Groq free tier: 200k tokens/day per model (`openai/gpt-oss-120b`); a full live scenario run uses a big share. Use `--model openai/gpt-oss-20b` when the limit is hit.
 
@@ -179,8 +182,12 @@ Implementation (`app/agent/`):
 5. ✅ Scenario tests (fake LLM, no API key) + optional live run; plus memory (summary, focus, long-term profile)
 6. ✅ FastAPI `/chat` endpoint
 7. ✅ Suppliers: reorder point, purchase orders with manager approval, receiving, backorders
-8. Delivery (riders, pickup, proof of delivery, stock release) — next, after the user pushes 7
-9. Payments (COD, advance verification, credit, supplier payment)
+8. ✅ Payments: online advance payment verified by an accountant, 24h deadline, supplier invoices (three-way match)
+9. Delivery — next, after the user pushes 8. User's choices: riders by area first, then fewest deliveries today,
+   capacity 3, FIFO queue when full; delivery date = same day if paid before 2 PM PKT else next day (already set as
+   `orders.delivery_date` by verify_payment); NO OTP for now; failed delivery → retry once next day, then return
+   (stock released). Needs: riders, deliveries tables, customer area, order statuses assigned/out_for_delivery/
+   delivered/returned (CHECK migration), stock physical −= qty on delivery, rider endpoints, customer messages.
 
 ## Procurement (suppliers) — `app/tools/procurement.py`
 
@@ -191,6 +198,37 @@ User's choices: triggers = reorder point after each confirmed order + daily chec
 - `get_restock_eta(product_id)` (read; LLM tool): incoming qty + eta_days (from expected_at, else supplier lead time).
 - Agent: `check_stock` adds a `backorder` option when short, available > 0 and stock is incoming; `state.backorders`; summary/confirmed facts include `backorders`; `invoice` node creates backorder rows and runs `run_reorder_check` for the ordered + backordered products.
 - Staff endpoints `app/api/staff.py` (`/staff/reorder-check`, `/staff/purchase-orders[...]/approve|reject|send|receive`); tool error codes → HTTP 404/409/403/422. Daily job: `python -m app.jobs reorder-check [--test-db]`.
+
+## Payments — `app/tools/payments.py`, `app/tools/payables.py`, `app/api/finance.py`
+
+User's choices: **online payment only** (bank transfer / JazzCash / Easypaisa, no COD, no credit, no gateway);
+a human (accounts) verifies every payment; 24h deadline; supplier bills need three-way match + manager approval
++ a different person records payment.
+- Migration `ebe90ceec433` (hand-edited: drop `ck_orders_status` → UPDATE confirmed/fulfilled → ready_to_dispatch →
+  new CHECK; server_default awaiting_payment). Tables `payments` (partial unique indexes: one live payment per
+  order; (method, reference) unique unless rejected), `supplier_invoices` (unique (supplier, invoice_number),
+  CHECK difference = amount − expected_amount), `suppliers.payment_terms_days` (KW 15, Metro 7, Sindh 30).
+- `confirm_order` creates `awaiting_payment` with `payment_due_at = now + 24h` (`orders.PAYMENT_WINDOW`).
+  `orders.release_reservation(s, order)` = guarded `reserved -= qty` (also for Part 2).
+- `submit_payment`: locks the customer's latest awaiting_payment order (or by number); pending claim exists →
+  `already_submitted`; no unpaid order but one cancelled in the last 3 days → `ORDER_CANCELLED` (late payer:
+  agent notifies accounts for a refund); notifies `accounts`. `verify_payment` (pending → verified; order → ready_to_dispatch,
+  paid_at, `delivery_date_for` = PKT (fixed UTC+5) < 14:00 same day else next) writes the customer message in
+  the SAME transaction (`record_message(..., session=s)`, templates en/roman_ur/ur in `MESSAGES`, language from
+  the draft) + notifies warehouse. `reject_payment` → customer asked for a new ID; after the deadline → cancel.
+- verify/reject take `payment` = payment id, `ORD-…` or the transaction reference (`_matching_ids`; id and reference
+  pointing at different payments → `AMBIGUOUS_PAYMENT`; not found → message lists waiting payments).
+- `cancel_unpaid_orders` (job `payment-deadline`, endpoint `/staff/payments/cancel-unpaid`): only orders past due
+  with NO pending/verified payment (re-checked after `FOR UPDATE`); releases stock, cancels waiting backorders,
+  messages the customer; reminds accounts about claims older than 2h.
+- Payables: `record_supplier_invoice` (PO must be (partially_)received; expected = received value − earlier
+  invoices' expected; mismatch flagged), `approve` (≠ recorder; mismatch needs `override_reason` else
+  `INVOICE_MISMATCH`), `reject` (message to supplier thread), `pay` (≠ approver), `list_supplier_invoices`
+  (overdue_only, total_open).
+- Agent: confirmation reply facts include `pay_to` (`payments.PAY_TO`) and `pay_before`; the `memory` node
+  reloads `get_customer_profile` every turn (`open_orders` → `OPEN ORDERS` line) so the LLM sees verifications
+  that happened while the customer was away. AgentReply.status stays `confirmed` after "yes".
+- notify_staff roles: sales, warehouse, manager, accounts.
 
 ## API (`app/api/main.py`)
 
@@ -219,6 +257,7 @@ pytest                       # DB tests run on the Neon TEST branch only
 python -m app.cli --phone "+92 300 1234567"                      # live chat (Groq), main DB
 python -m app.cli --phone "+92 300 1234567" --test-db --seed-reset -m "10 cartons dalda" -m "yes"
 python -m app.cli --phone "+92 300 1234567" --reset-thread       # forget conversation state
+python -m app.jobs payment-deadline [--test-db]                  # cancel unpaid orders (run hourly)
 uvicorn app.api.main:app --reload                                # API on http://127.0.0.1:8000 (docs at /docs)
 $env:USE_TEST_DB="1"; uvicorn app.api.main:app                   # API on the test branch
 ```
