@@ -47,9 +47,9 @@ from app.agent.llm import (
 )
 from app.agent.text import TASKS, backup, display, number_guard, stock_option_label
 from app.tools import (
-    ErrorCode, cancel_draft, check_stock, confirm_order, create_draft, generate_invoice, get_customer_profile,
-    get_order_history, get_prices, identify_customer, list_products, log_context, log_event, notify_staff,
-    recent_messages, search_products, suggest_alternatives,
+    ErrorCode, cancel_draft, check_stock, confirm_order, create_backorders, create_draft, generate_invoice,
+    get_customer_profile, get_order_history, get_prices, get_restock_eta, identify_customer, list_products,
+    log_context, log_event, notify_staff, recent_messages, run_reorder_check, search_products, suggest_alternatives,
 )
 
 MAX_TOOL_ROUNDS = 5
@@ -88,6 +88,7 @@ class OrderState(TypedDict, total=False):
     summarized_until: int
     focus: list[dict]
     profile: Optional[dict]
+    backorders: list[dict]
     status: str
     outbox: Annotated[list[str], merge_outbox]
 
@@ -95,7 +96,7 @@ class OrderState(TypedDict, total=False):
 ORDER_RESET: dict[str, Any] = {
     "requested": [], "items": [], "awaiting": None, "question": None, "base_question": None, "options": [],
     "choice_index": None, "choice": None, "pricing": None, "draft": None, "order": None, "invoice": None,
-    "cancel_request": None,
+    "cancel_request": None, "backorders": [],
 }
 
 
@@ -333,6 +334,8 @@ def build_graph(llm: OrderLLM, checkpointer=None):
                 res = check_stock(items=args.get("items", []))
             elif name == "suggest_alternatives":
                 res = suggest_alternatives(product_id=args.get("product_id", ""), qty_needed=args.get("qty_needed", 1))
+            elif name == "get_restock_eta":
+                res = get_restock_eta(product_id=args.get("product_id", ""))
             elif name == "get_prices":
                 res = get_prices(customer_id=customer_id, items=args.get("items", []))
             else:  # get_order_history
@@ -513,8 +516,11 @@ def build_graph(llm: OrderLLM, checkpointer=None):
                            goto="resolve_products")
         if chosen["kind"] == "cancel":
             return Command(goto="cancel")
-        return Command(update={"items": chosen["items_after"], "awaiting": None, "options": [], "choice": None},
-                       goto="check_stock")
+        update = {"items": chosen["items_after"], "awaiting": None, "options": [], "choice": None}
+        if chosen["kind"] == "backorder":
+            kept = [b for b in state.get("backorders") or [] if b["product_id"] != chosen["backorder"]["product_id"]]
+            update["backorders"] = kept + [chosen["backorder"]]
+        return Command(update=update, goto="check_stock")
 
     @node("check_stock")
     def check_stock_node(state: OrderState):
@@ -535,6 +541,14 @@ def build_graph(llm: OrderLLM, checkpointer=None):
         if short.available > 0:
             options.append({**base, "kind": "partial", "qty": short.available,
                             "items_after": others + [{**item, "qty": short.available}]})
+            eta = get_restock_eta(short.product_id)
+            if eta.success and eta.incoming_qty > 0 and eta.eta_days is not None:
+                options.append({**base, "kind": "backorder", "qty": short.available,
+                                "backorder_qty": short.shortfall, "eta_days": eta.eta_days,
+                                "items_after": others + [{**item, "qty": short.available}],
+                                "backorder": {"product_id": item["product_id"], "name": item["name"],
+                                              "unit": item["unit"], "qty": short.shortfall,
+                                              "eta_days": eta.eta_days}})
         if alt is not None:
             alt_line = {"product_id": alt.product_id, "name": alt.name, "unit": item["unit"]}
             if short.available > 0:
@@ -582,6 +596,8 @@ def build_graph(llm: OrderLLM, checkpointer=None):
         d = state["draft"]
         facts = {"customer_name": state["customer"]["name"], "lines": d["lines"], "subtotal": d["subtotal"],
                  "discount_pct": d["discount_pct"], "discount_amount": d["discount_amount"], "total": d["total"]}
+        if state.get("backorders"):
+            facts["backorders"] = state["backorders"]
         text = say(state, "summary", facts, required=(d["total"],))
         return ask("confirmation", text)
 
@@ -629,8 +645,18 @@ def build_graph(llm: OrderLLM, checkpointer=None):
             notify_staff("manager", f"Invoice failed for {order['order_number']}: {res.message}")
         guard("success_confirmed_by_tools", order["success"] and not order["already_confirmed"],
               order_number=order["order_number"], invoice_ok=res.success)
+        backorders = state.get("backorders") or []
+        if backorders:
+            create_backorders(customer_id=state["customer"]["customer_id"], order_id=order["order_id"],
+                              thread_id=state["thread_id"],
+                              items=[{"product_id": b["product_id"], "qty": b["qty"]} for b in backorders])
+        run_reorder_check(reason=f"reorder point after {order['order_number']}",
+                          product_ids=sorted({l["product_id"] for l in order["lines"]}
+                                             | {b["product_id"] for b in backorders}))
         facts = {"order_number": order["order_number"], "invoice_number": res.invoice_number if res.success else "pending",
                  "total": order["total"], "address": state["customer"]["address"]}
+        if backorders:
+            facts["backorders"] = backorders
         text = say(state, "confirmed", facts, required=(order["total"], order["order_number"]))
         return finish(state, text, "confirmed", invoice=res.model_dump(mode="json") if res.success else None)
 

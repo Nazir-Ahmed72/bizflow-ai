@@ -150,7 +150,55 @@ Note the layers of protection against a double "yes": the lock (messages wait in
 
 ---
 
-## 10. Testing an LLM app
+## 10. Buying from suppliers (procure-to-pay)
+
+**Idea.** A distributor runs two cycles. *Order-to-cash*: customers order, we deliver and get paid (sections 1–9).
+*Procure-to-pay*: we buy from suppliers, receive the goods, and pay. This section is the first half of procure-to-pay.
+
+**Concepts, and where they live** ([backend/app/tools/procurement.py](../backend/app/tools/procurement.py)):
+
+| Concept | What it means | In this project |
+|---|---|---|
+| **Reorder point** (min) | "Buy more when stock falls to this level" | `inventory.reorder_level` |
+| **Max level** (order-up-to) | "Buy enough to get back up to this level" | `inventory.max_level`; quantity = max − position |
+| **Inventory position** | physical − reserved + already on order | `_inventory_positions()`: counting stock *on its way* is what prevents ordering twice |
+| **Minimum order quantity** | Suppliers won't sell less than X | `supplier_products.min_order_qty`; we round up |
+| **Lead time** | Days from ordering until delivery | `supplier_products.lead_time_days` → `expected_at`, `get_restock_eta` |
+| **Preferred supplier + fallback** | Fixed priority list per product | `supplier_products.priority` (1 = preferred); a rejection with `try_next_supplier` skips that supplier |
+| **Purchase order state machine** | Only allowed status changes | `_transition()`: draft → approved → sent → (partially_)received; rejected |
+| **Human in the loop** | People approve and record; the system proposes | staff endpoints in [backend/app/api/staff.py](../backend/app/api/staff.py) |
+| **Maker-checker / separation of duties** | The approver can't also confirm receipt | `receive_purchase_order` returns `SAME_PERSON` |
+| **Backorder** | A promise to deliver the rest later | `backorders` table; marked `ready` when goods arrive |
+| **Triggers** | When to run the check | B: after every confirmed order (`invoice` node). C: daily job `python -m app.jobs reorder-check` |
+
+**Two patterns you've seen before, reused.**
+- *Serialising with a lock:* two orders confirmed at the same moment could both see "low stock" and both draft
+  a purchase order. `run_reorder_check` takes a transaction-level advisory lock (`pg_advisory_xact_lock`) first,
+  so checks run one at a time. Same idea as the conversation lock in §9.
+- *State machine with a locked read:* `_transition()` loads the purchase order `FOR UPDATE`, checks the current
+  status is allowed, then changes it, all in one transaction. Two managers clicking "approve" at once can't both succeed.
+
+**Why the database status and not a LangGraph interrupt for approvals?** An interrupt pauses *a conversation*.
+A purchase order isn't a conversation: anyone may approve it, at any time, from any screen, and we want to list,
+filter and audit them. A status column plus endpoints fits that better. Use interrupts for "this conversation
+waits for this person's reply"; use a status for "this record waits for someone to act".
+
+**Scheduling the daily check.** The job is a normal command, so any scheduler can run it. On Windows:
+`schtasks /create /tn "BizFlow reorder check" /sc daily /st 06:00 /tr "<path>\.venv\Scripts\python.exe -m app.jobs reorder-check"`
+(run from `backend/`). On Linux you'd use cron. Keeping jobs as plain commands means they're easy to test and run by hand.
+
+**Read.**
+- Reorder point: https://en.wikipedia.org/wiki/Reorder_point
+- Safety stock (the next refinement of the reorder point): https://en.wikipedia.org/wiki/Safety_stock
+- Purchase order: https://en.wikipedia.org/wiki/Purchase_order
+- Finite-state machine: https://en.wikipedia.org/wiki/Finite-state_machine
+- Separation of duties: https://en.wikipedia.org/wiki/Separation_of_duties
+- PostgreSQL advisory locks (transaction-level `pg_advisory_xact_lock`): https://www.postgresql.org/docs/current/explicit-locking.html#ADVISORY-LOCKS
+- FastAPI routers (`APIRouter`, how the staff endpoints are grouped): https://fastapi.tiangolo.com/tutorial/bigger-applications/
+
+---
+
+## 11. Testing an LLM app
 
 **Idea.** You can't test "is the model smart?" with exact assertions, but you *can* test everything around it. The scenario tests use a **scripted fake LLM** that says "for 'yes', call `confirm_pending_order`". Everything after that decision is real code on a real (test) database. A separate live test checks the real model, only when you ask (`RUN_LIVE_LLM=1`), because it costs tokens.
 

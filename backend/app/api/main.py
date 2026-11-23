@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.llm import OrderLLM
 from app.agent.service import OrderAgent, postgres_checkpointer
+from app.api.staff import router as staff_router
 from app.tools import ConversationBusy
 
 
@@ -51,6 +52,8 @@ def create_app(llm: Optional[OrderLLM] = None) -> FastAPI:
 
     app = FastAPI(title="BizFlow AI", version="0.1.0", lifespan=lifespan,
                   description="Order agent for a Karachi FMCG distributor.")
+
+    app.include_router(staff_router)
 
     def get_agent(request: Request) -> OrderAgent:
         return request.app.state.agent

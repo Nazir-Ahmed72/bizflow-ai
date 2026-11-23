@@ -56,6 +56,11 @@ the AI.
 | **Remembers context**: the product being discussed, long chats, usual orders | "how many in a carton?", "send my usual order" |
 | **Replies in the customer's language** | Roman Urdu in, Roman Urdu out |
 | **Hands over to staff** when a human is needed | unknown numbers, cancelling a confirmed order, policy questions |
+| **Reorders from suppliers automatically** when stock falls to its reorder point | Nestle at 18 (reorder point 40) → purchase order for 62 cartons |
+| **Picks the supplier** (preferred supplier, with fallbacks) | Metro Supply for water; Karachi Wholesale if Metro can't deliver |
+| **Keeps a manager in the loop**: every purchase order needs approval | draft → approved → sent → received |
+| **Offers backorders** when new stock is on its way | "18 now, the other 12 when stock arrives (about 1 day)" |
+| **Tells customers when stock returns** | "when will Tapal be back?" |
 | **Logs everything** | every AI decision, tool call and safety check, with timing |
 
 ## What it guarantees
@@ -183,6 +188,44 @@ sequenceDiagram
 
 ---
 
+## Restocking from suppliers
+
+After every confirmed order, and once a day, BizFlow AI checks each product's stock against its reorder point and
+drafts purchase orders from the preferred supplier. A manager approves every purchase order; stock goes up only
+when the goods are actually received.
+
+```mermaid
+flowchart TD
+    trigger1((order confirmed)) --> check
+    trigger2((daily check)) --> check
+    check{"stock + incoming<br/>at or below<br/>reorder point?"} -- no --> ok((nothing to do))
+    check -- yes --> pick["pick supplier<br/>preferred first, then fallbacks"]
+    pick --> qty["quantity = refill to max level<br/>(at least the supplier's minimum)"]
+    qty --> draft["draft purchase order<br/>(one per supplier)"] --> notify[notify manager]
+    notify --> decide{manager}
+    decide -- approve --> sent[send to supplier<br/>expected arrival date]
+    decide -- reject --> next[try next supplier] --> draft
+    sent --> receive["storekeeper records goods received<br/>(not the approver)"]
+    receive --> stock[(stock goes up)]
+    stock --> back[customers waiting on backorders<br/>are told the stock is back]
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> draft: system proposes
+    draft --> approved: manager approves
+    draft --> rejected: manager rejects
+    approved --> rejected: manager rejects
+    approved --> sent: sent to supplier
+    sent --> partially_received: some goods arrive
+    partially_received --> received: the rest arrives
+    sent --> received: all goods arrive
+    received --> [*]
+    rejected --> [*]
+```
+
+---
+
 ## Memory
 
 The assistant keeps track of the conversation at several levels, so customers can talk naturally.
@@ -277,6 +320,52 @@ erDiagram
     }
 ```
 
+```mermaid
+erDiagram
+    SUPPLIERS ||--o{ SUPPLIER_PRODUCTS : offers
+    PRODUCTS ||--o{ SUPPLIER_PRODUCTS : "bought from"
+    SUPPLIERS ||--o{ PURCHASE_ORDERS : receives
+    PURCHASE_ORDERS ||--|{ PURCHASE_ORDER_ITEMS : contains
+    PRODUCTS ||--o{ PURCHASE_ORDER_ITEMS : restocks
+    ORDERS ||--o{ BACKORDERS : "rest delivered later"
+
+    SUPPLIERS {
+        int id PK
+        string name UK
+        string phone
+    }
+    SUPPLIER_PRODUCTS {
+        int supplier_id FK
+        string product_id FK
+        int priority
+        numeric unit_cost
+        int lead_time_days
+        int min_order_qty
+    }
+    PURCHASE_ORDERS {
+        int id PK
+        string po_number UK
+        string status
+        numeric total_cost
+        string approved_by
+        timestamp expected_at
+    }
+    PURCHASE_ORDER_ITEMS {
+        int purchase_order_id FK
+        string product_id FK
+        int qty_ordered
+        int qty_received
+        numeric unit_cost
+    }
+    BACKORDERS {
+        int id PK
+        int order_id FK
+        string product_id FK
+        int qty
+        string status
+    }
+```
+
 Also stored: the full message history, an activity log of every AI decision and business action, and
 notifications for staff.
 
@@ -334,6 +423,11 @@ Karachi Mart `+92 345 2201876` (no discount), Madina General Store `+92 312 4478
 | `POST` | `/chat` | send a customer message, get the assistant's replies |
 | `GET` | `/conversations/{phone}` | a customer's chat history and what the assistant is waiting for |
 | `GET` | `/health` | service status |
+| `POST` | `/staff/reorder-check` | check all products now and draft purchase orders |
+| `GET` | `/staff/purchase-orders?status=draft` | purchase orders, optionally by status |
+| `POST` | `/staff/purchase-orders/{po}/approve` · `/reject` · `/send` · `/receive` | the manager and storekeeper steps |
+
+The daily check can also run as a scheduled job: `python -m app.jobs reorder-check`.
 
 ```json
 POST /chat
@@ -355,6 +449,7 @@ POST /chat
 
 - WhatsApp Business integration
 - Phone orders by voice (Vapi)
-- Low-stock alerts to the warehouse
+- Delivery: assigning an available rider, pickup and proof of delivery
+- Payments: cash on delivery, advance payment verification, credit limits, paying suppliers
 - Staff dashboard: orders, stock, conversations, notifications
 - Deployment

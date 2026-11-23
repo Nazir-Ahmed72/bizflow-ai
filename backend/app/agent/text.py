@@ -61,6 +61,15 @@ def stock_option_label(opt: dict, lang: str = "en") -> str:
         return {"en": f"Take {opt['qty']} {u(opt['qty'], opt['unit'])} {opt['name']} only",
                 "roman_ur": f"Sirf {opt['qty']} {u(opt['qty'], opt['unit'])} {opt['name']} le lein",
                 "ur": f"صرف {opt['qty']} {u(opt['qty'], opt['unit'])} {opt['name']} لے لیں"}[lang]
+    if k == "backorder":
+        now = f"{opt['qty']} {u(opt['qty'], opt['unit'])}"
+        later = f"{opt['backorder_qty']} {u(opt['backorder_qty'], opt['unit'])}"
+        return {"en": f"Take {now} {opt['name']} now and the other {later} when new stock arrives "
+                      f"(about {opt['eta_days']} days)",
+                "roman_ur": f"Abhi {now} {opt['name']} le lein, baqi {later} naya stock aane par "
+                            f"(taqreeban {opt['eta_days']} din)",
+                "ur": f"ابھی {now} {opt['name']} لے لیں، باقی {later} نیا اسٹاک آنے پر "
+                      f"(تقریباً {opt['eta_days']} دن)"}[lang]
     if k == "substitute":
         both = (f"{opt['qty']} {u(opt['qty'], opt['unit'])} {opt['name']} + "
                 f"{opt['alt_qty']} {u(opt['alt_qty'], opt['alt_unit'])} {opt['alt_name']}")
@@ -78,13 +87,15 @@ def stock_option_label(opt: dict, lang: str = "en") -> str:
 
 TASKS = {
     "summary": "Order summary: list each line (product, qty, unit price, line total), then subtotal and discount "
-               "(skip both if discount is 0) and the total. Ask them to reply yes to confirm or no to cancel; "
-               "say it is valid for 2 hours.",
+               "(skip both if discount is 0) and the total. If 'backorders' is present, add that those items "
+               "will follow when new stock arrives (about eta_days days) and are not charged now. Ask them to "
+               "reply yes to confirm or no to cancel; say it is valid for 2 hours.",
     "product_choice": "Ask which product they mean for the phrase; list the numbered options (name, pack, price) "
                       "and ask them to reply with the number.",
     "stock_choice": "Say only 'available' units of the product are in stock (they asked for 'requested'); list the "
                     "numbered options exactly and ask them to reply with the number.",
-    "confirmed": "Tell them the order is confirmed: order number, invoice number, total, delivery address. Thank them.",
+    "confirmed": "Tell them the order is confirmed: order number, invoice number, total, delivery address. If "
+                 "'backorders' is present, say we will message them when those items are back in stock. Thank them.",
     "cancelled": "Tell them the pending order has been cancelled and they can order again any time.",
     "unknown_customer": "Their number is not registered, so no order can be placed; the sales team has been informed "
                         "and will contact them.",
@@ -111,7 +122,9 @@ def _summary(f: dict) -> str:
                       f"{rs(l['unit_price'])} = {rs(l['line_total'])}" for i, l in enumerate(f["lines"], 1))
     money = (f"Subtotal: {rs(f['subtotal'])}\nDiscount ({pct(f['discount_pct'])}): -{rs(f['discount_amount'])}\n"
              if Decimal(str(f["discount_amount"])) > 0 else "")
-    return (f"{f['customer_name']}, here is your order summary:\n{lines}\n{money}Total: {rs(f['total'])}\n"
+    later = "".join(f"Later (not charged now): {b['name']} x {b['qty']}, about {b['eta_days']} days\n"
+                    for b in f.get("backorders") or [])
+    return (f"{f['customer_name']}, here is your order summary:\n{lines}\n{money}Total: {rs(f['total'])}\n{later}"
             "Reply YES to confirm or NO to cancel. This summary is valid for 2 hours.")
 
 

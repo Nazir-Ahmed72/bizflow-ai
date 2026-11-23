@@ -14,6 +14,7 @@ import time
 from typing import Any, Optional, Protocol
 
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
+from pydantic import SecretStr
 
 from app.tools import log_event
 
@@ -47,6 +48,9 @@ READ_TOOLS = [
         ["product_id", "qty_needed"]),
     _fn("get_prices", "Exact prices for this customer: line totals, subtotal, discount and total. "
         "Use this for ANY price question involving quantities.", {"items": _ITEMS}, ["items"]),
+    _fn("get_restock_eta", "When a product will be back in stock: quantity on its way from a supplier and the "
+        "expected number of days. Use it for 'when will X be available?'. Never guess dates.",
+        {"product_id": {"type": "string"}}, ["product_id"]),
     _fn("get_order_history", "This customer's confirmed orders, newest first, or one order by number.",
         {"limit": {"type": ["integer", "null"], "minimum": 1, "maximum": 20},
          "order_number": {"type": ["string", "null"], "description": "e.g. ORD-000004"}}, []),
@@ -108,7 +112,7 @@ BUSINESS FACTS (the only policies you may state)
 
 HOW TO WORK
 - Use the read-only tools (list_products, search_products, check_stock, suggest_alternatives, get_prices,
-  get_order_history) to answer questions. NEVER calculate prices, totals, discounts, counts or stock yourself:
+  get_restock_eta, get_order_history) to answer questions. NEVER calculate prices, totals, discounts, counts or stock yourself:
   every number you write must come from a tool result or the conversation. For any total, call get_prices.
 - Only state facts from tool results or BUSINESS FACTS. Never invent policies, fees, delivery times or offers;
   use forward_to_staff for anything else.
@@ -147,9 +151,11 @@ If FACTS has numbered options, list them with the same numbers. Plain text, no m
 class OrderLLM(Protocol):
     def decide(self, system: str, messages: list[BaseMessage], tools: list[dict]) -> AIMessage:
         """One chat turn with tools available: returns text and/or tool calls."""
+        ...
 
     def write(self, system: str, prompt: str) -> str:
         """Plain text generation (used to phrase replies from facts)."""
+        ...
 
 
 class GroqLLM:
@@ -159,7 +165,7 @@ class GroqLLM:
         from app.config import GROQ_MODEL, groq_api_key
 
         self.model = model or GROQ_MODEL
-        self._chat = ChatGroq(model=self.model, api_key=api_key or groq_api_key(), max_retries=2)
+        self._chat = ChatGroq(model=self.model, api_key=SecretStr(api_key or groq_api_key()), max_retries=2)
 
     def decide(self, system: str, messages: list[BaseMessage], tools: list[dict]) -> AIMessage:
         return self._chat.bind_tools(tools, tool_choice="auto").invoke([SystemMessage(system), *messages])

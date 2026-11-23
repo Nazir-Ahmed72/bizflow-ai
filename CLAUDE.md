@@ -178,6 +178,19 @@ Implementation (`app/agent/`):
 4. ✅ LangGraph agent + CLI chat script (`python -m app.cli --phone ...`)
 5. ✅ Scenario tests (fake LLM, no API key) + optional live run; plus memory (summary, focus, long-term profile)
 6. ✅ FastAPI `/chat` endpoint
+7. ✅ Suppliers: reorder point, purchase orders with manager approval, receiving, backorders
+8. Delivery (riders, pickup, proof of delivery, stock release) — next, after the user pushes 7
+9. Payments (COD, advance verification, credit, supplier payment)
+
+## Procurement (suppliers) — `app/tools/procurement.py`
+
+User's choices: triggers = reorder point after each confirmed order + daily check; supplier choice = **preferred supplier with fallbacks** (no scoring); manager always approves; sending to suppliers is simulated; backorders offered.
+- Tables (migration `cd5e56569960`): `suppliers`, `supplier_products` (priority 1 = preferred, unit_cost, lead_time_days, min_order_qty; unique (product, priority)), `purchase_orders` (status draft/approved/rejected/sent/partially_received/received/cancelled, approved_by, expected_at), `purchase_order_items` (qty_ordered, qty_received ≤ ordered, line_total = qty × cost), `backorders` (waiting/ready/cancelled). `inventory.max_level` (≥ reorder_level).
+- `run_reorder_check(reason, product_ids?, exclude_supplier_ids?)`: takes `pg_advisory_xact_lock(hashtext('reorder-check'))`; position = physical − reserved + on order (open POs: draft/approved/sent/partially_received); if position ≤ reorder_level → qty = max(max_level − position, MOQ) from the lowest-priority active supplier; appends to that supplier's existing draft PO or creates `PO-000001`; notifies manager.
+- `approve` / `reject(try_next_supplier → reorder check excluding that supplier)` / `send` (sets expected_at = now + max lead time; logs a simulated message on thread `supplier:<id>`) / `receive` (only sent/partially_received; receiver ≠ approver → `SAME_PERSON`; over-receipt → `RECEIPT_EXCEEDS_ORDER`; physical += qty; marks waiting backorders `ready` FIFO and messages the customer thread + notifies sales). Transitions via `_transition()` (row locked FOR UPDATE, allowed-status check → `INVALID_TRANSITION`).
+- `get_restock_eta(product_id)` (read; LLM tool): incoming qty + eta_days (from expected_at, else supplier lead time).
+- Agent: `check_stock` adds a `backorder` option when short, available > 0 and stock is incoming; `state.backorders`; summary/confirmed facts include `backorders`; `invoice` node creates backorder rows and runs `run_reorder_check` for the ordered + backordered products.
+- Staff endpoints `app/api/staff.py` (`/staff/reorder-check`, `/staff/purchase-orders[...]/approve|reject|send|receive`); tool error codes → HTTP 404/409/403/422. Daily job: `python -m app.jobs reorder-check [--test-db]`.
 
 ## API (`app/api/main.py`)
 
