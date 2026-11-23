@@ -7,7 +7,8 @@ WRITES (only the agent's graph nodes, staff endpoints and jobs call these):
     create_draft, cancel_draft, confirm_order, generate_invoice, notify_staff, create_backorders,
     run_reorder_check, approve/reject/send/receive_purchase_order,
     submit_payment, verify_payment, reject_payment, cancel_unpaid_orders,
-    record/approve/reject/pay_supplier_invoice
+    record/approve/reject/pay_supplier_invoice,
+    run_dispatch, pickup_delivery, complete_delivery, fail_delivery, set_rider_duty
 Plumbing: record_message, recent_messages, log_event, log_context, conversation_lock
 """
 from app.tools.base import ErrorCode, ToolError, log_context, log_event
@@ -18,6 +19,10 @@ from app.tools.notify import ConversationBusy, conversation_lock, notify_staff, 
 from app.tools.orders import (
     cancel_draft, confirm_order, create_draft, generate_invoice, get_customer_profile, get_order_history,
     idempotency_key_for,
+)
+from app.tools.delivery import (
+    complete_delivery, fail_delivery, list_deliveries, list_riders, pickup_delivery, run_dispatch, set_rider_duty,
+    today_pkt,
 )
 from app.tools.payables import (
     approve_supplier_invoice, list_supplier_invoices, pay_supplier_invoice, record_supplier_invoice,
@@ -42,6 +47,8 @@ __all__ = [
     "PAY_TO", "local_time_text",
     "record_supplier_invoice", "approve_supplier_invoice", "reject_supplier_invoice", "pay_supplier_invoice",
     "list_supplier_invoices",
+    "run_dispatch", "pickup_delivery", "complete_delivery", "fail_delivery", "list_riders", "set_rider_duty",
+    "list_deliveries", "today_pkt",
     "idempotency_key_for", "record_message", "recent_messages", "conversation_lock", "ConversationBusy",
     "log_event", "log_context",
     "ErrorCode", "ToolError",

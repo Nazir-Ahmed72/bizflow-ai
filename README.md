@@ -22,6 +22,9 @@ Bot:      Shukriya! Accounts team payment check kar rahi hai, confirm hote hi aa
           ... (later, after the accountant checks the bank statement) ...
 Bot:      Order ORD-000001 ki payment Rs 62,230 mil gayi hai. Aap ka order confirm ho gaya hai aur aaj
           (24 Nov) Liaquatabad No. 10 par deliver hoga. Shukriya!
+Bot:      Aap ka order ORD-000001 aaj hamara rider Yasir (+923035550104) deliver karega.
+Bot:      Aap ka order ORD-000001 rawana ho gaya hai, rider Yasir (+923035550104) aa raha hai.
+Bot:      Order ORD-000001 deliver ho gaya hai. Shukriya!
 ```
 
 ---
@@ -38,6 +41,7 @@ A distributor in Karachi serves hundreds of small shops. Orders arrive all day a
 - confirm with the shop, then enter the order, reserve the stock and issue an invoice
 - chase the payment, match it against the bank statement, and only then release the goods
 - pay suppliers the right amount, only for goods that actually arrived
+- decide which rider takes which order, and keep the shop informed until the goods arrive
 
 This is slow, error-prone and doesn't scale. A wrong total, a double-booked order or overselling stock costs
 money and trust.
@@ -75,6 +79,10 @@ the AI.
 | **Cancels unpaid orders** after 24 hours and frees the reserved stock | reported payments are never cancelled while accounts is busy |
 | **Schedules delivery** | paid before 2 PM: delivered the same day; otherwise the next day |
 | **Pays suppliers safely**: invoice checked against what was ordered and received | billed for 62 cartons, received 60 → flagged |
+| **Assigns riders automatically**: same area first, then whoever has delivered least today | Ali Traders (Saddar) → Imran, the Saddar rider |
+| **Never overloads a rider** (3 deliveries at a time) and queues the rest | the 4th order waits and goes to the first rider who finishes |
+| **Keeps the shop informed** at every step | rider assigned (name, phone) → on the way → delivered |
+| **Retries failed deliveries** once the next day, then returns the goods | shop closed twice → back to the warehouse, refund arranged |
 | **Logs everything** | every AI decision, tool call and safety check, with timing |
 
 ## What it guarantees
@@ -85,6 +93,8 @@ the AI.
 - **No double orders:** repeated or simultaneous confirmations produce exactly one order.
 - **No silent failures:** success is reported only after the order and invoice really exist.
 - **No dispatch without verified payment:** a person checks every payment; the amount always comes from the order.
+- **Stock is exact:** reserved when the customer says yes, removed from the warehouse only when the rider delivers,
+  released if the order is cancelled or returned.
 - **No paying twice or for missing goods:** supplier invoices are matched against receipts, and recording,
   approving and paying are done by three different people.
 
@@ -99,8 +109,9 @@ flowchart TB
     subgraph Clients
         CLI["CLI chat"]
         API["REST API<br/>POST /chat"]
-        Staff["Staff endpoints<br/>manager, accounts, storekeeper"]
-        Jobs["Scheduled jobs<br/>reorder check, payment deadline"]
+        Staff["Staff endpoints<br/>manager, accounts, storekeeper, dispatcher"]
+        Riders["Rider app endpoints<br/>pickup, delivered, failed"]
+        Jobs["Scheduled jobs<br/>reorder check, payment deadline, dispatch"]
         Future["WhatsApp / voice<br/>(planned)"]
     end
 
@@ -131,6 +142,7 @@ flowchart TB
     LLM -- "may look up" --> Read
     Graph -- "only the workflow acts" --> Write
     Staff --> Write
+    Riders --> Write
     Jobs --> Write
     Graph --> Read
     Read --> Business
@@ -281,7 +293,44 @@ stateDiagram-v2
     awaiting_payment --> ready_to_dispatch: accountant verifies the payment
     awaiting_payment --> awaiting_payment: payment rejected, customer sends a new ID
     awaiting_payment --> cancelled: no payment reported within 24 hours (stock released)
-    ready_to_dispatch --> [*]: delivery (next)
+    ready_to_dispatch --> [*]: delivery
+    cancelled --> [*]
+```
+
+## Delivering
+
+Once a payment is verified, the order is queued for its delivery day: today if paid before 2 PM, otherwise
+tomorrow. On that day each order goes to a rider, and the shop hears about every step.
+
+```mermaid
+flowchart TD
+    paid((payment verified)) --> q[queued for its delivery day]
+    q --> due{"delivery day<br/>reached?"}
+    due -- no --> wait1[waits until that morning]
+    due -- yes --> area{"rider from the shop's area<br/>on duty with room?<br/>(max 3 at a time)"}
+    area -- yes --> assign
+    area -- no --> any{"any rider with room?<br/>(fewest deliveries today first)"}
+    any -- yes --> assign["rider assigned<br/>shop gets name + phone"]
+    any -- no --> queue["waits in line (oldest first)<br/>dispatcher told"]
+    queue -. a rider finishes .-> area
+    assign --> pick["rider picks up<br/>shop: on its way"]
+    pick --> outcome{at the shop}
+    outcome -- delivered --> done[("delivered<br/>stock leaves the warehouse")]
+    outcome -- "failed, 1st time" --> retry[try again tomorrow] --> q
+    outcome -- "failed, 2nd time" --> ret[("returned<br/>stock released, refund arranged")]
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> awaiting_payment: customer says yes
+    awaiting_payment --> ready_to_dispatch: payment verified
+    awaiting_payment --> cancelled: unpaid after 24 hours
+    ready_to_dispatch --> out_for_delivery: rider picks up
+    out_for_delivery --> delivered: handed over
+    out_for_delivery --> ready_to_dispatch: failed, retry tomorrow
+    out_for_delivery --> returned: failed twice
+    delivered --> [*]
+    returned --> [*]
     cancelled --> [*]
 ```
 
@@ -345,6 +394,8 @@ erDiagram
     ORDERS ||--|{ ORDER_ITEMS : contains
     ORDERS ||--o| INVOICES : billed_by
     ORDERS ||--o{ PAYMENTS : "paid by"
+    ORDERS ||--o{ DELIVERIES : "delivery attempts"
+    RIDERS ||--o{ DELIVERIES : carries
     PRODUCTS ||--|| INVENTORY : stocked_as
     PRODUCTS ||--o{ ORDER_ITEMS : "price snapshot"
 
@@ -358,6 +409,7 @@ erDiagram
         string name
         string price_category FK
         string address
+        string area
     }
     PRODUCTS {
         string id PK
@@ -387,6 +439,22 @@ erDiagram
         string status
         timestamp payment_due_at
         date delivery_date
+    }
+    DELIVERIES {
+        int id PK
+        int order_id FK
+        int rider_id FK
+        int attempt
+        string status
+        date scheduled_date
+    }
+    RIDERS {
+        int id PK
+        string name
+        string area
+        int capacity
+        int active_count
+        bool is_on_duty
     }
     PAYMENTS {
         int id PK
@@ -515,6 +583,7 @@ uvicorn app.api.main:app --reload
 
 **Demo shops:** Ali Traders `+92 300 1234567` (2% discount), Bismillah Store `+92 321 5550192` (3%),
 Karachi Mart `+92 345 2201876` (no discount), Madina General Store `+92 312 4478210` (2%).
+**Demo riders:** Imran (Saddar), Kashif (Gulshan), Naveed (Tariq Road), Yasir (Liaquatabad), 3 deliveries at a time.
 **Demo products:** Dalda oil, Sooper biscuits, three kinds of rice, Nestle and Aquafina water, Tapal tea.
 
 ---
@@ -535,7 +604,14 @@ Karachi Mart `+92 345 2201876` (no discount), Madina General Store `+92 312 4478
 | `GET` / `POST` | `/staff/supplier-invoices` | list supplier bills (due, overdue) / record a supplier's invoice |
 | `POST` | `/staff/supplier-invoices/{id}/approve` · `/reject` · `/pay` | manager approval and recording the payment |
 
-Scheduled jobs: `python -m app.jobs reorder-check` (daily) and `python -m app.jobs payment-deadline` (hourly).
+| `POST` | `/staff/dispatch` | assign today's waiting deliveries to riders now |
+| `GET` | `/staff/deliveries` · `/staff/riders` | deliveries by status or date; riders with today's load |
+| `GET` | `/riders/{rider}/deliveries` | a rider's current jobs (for a rider app) |
+| `POST` | `/riders/{rider}/deliveries/{id}/pickup` · `/delivered` · `/failed` | the rider's steps |
+| `POST` | `/riders/{rider}/duty` | start or end a shift |
+
+Scheduled jobs: `python -m app.jobs reorder-check` (daily), `python -m app.jobs payment-deadline` (hourly) and
+`python -m app.jobs dispatch` (every morning, then every 15 minutes).
 
 ```json
 POST /chat
@@ -557,7 +633,7 @@ POST /chat
 
 - WhatsApp Business integration
 - Phone orders by voice (Vapi)
-- Delivery: assigning riders by area and workload, pickup, failed-delivery retries
+- Proof of delivery (a code the shop gives the rider) and live rider location
 - Payment gateway (automatic verification), cash on delivery and credit limits
 - Staff dashboard: orders, stock, conversations, notifications
 - Deployment

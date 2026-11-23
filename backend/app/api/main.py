@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.llm import OrderLLM
 from app.agent.service import OrderAgent, postgres_checkpointer
+from app.api.delivery import riders_router, staff_delivery_router
 from app.api.finance import router as finance_router
 from app.api.staff import router as staff_router
 from app.tools import ConversationBusy
@@ -56,6 +57,8 @@ def create_app(llm: Optional[OrderLLM] = None) -> FastAPI:
 
     app.include_router(staff_router)
     app.include_router(finance_router)
+    app.include_router(staff_delivery_router)
+    app.include_router(riders_router)
 
     def get_agent(request: Request) -> OrderAgent:
         return request.app.state.agent

@@ -218,6 +218,8 @@ def _open_order_text(o: dict) -> str:
         return f"{o['order_number']} waiting for payment ({total}, pay before {due}{review})"
     if o["status"] == "ready_to_dispatch":
         return f"{o['order_number']} paid ({total}), delivery on {o.get('delivery_date')}"
+    if o["status"] == "out_for_delivery":
+        return f"{o['order_number']} paid ({total}), on the way with the rider now (get_order_status for details)"
     return f"{o['order_number']} {o['status']} ({total})"
 
 

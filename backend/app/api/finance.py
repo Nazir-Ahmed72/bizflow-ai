@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from app.api.staff import _ok
 from app.tools import (
     approve_supplier_invoice, cancel_unpaid_orders, list_payments, list_supplier_invoices, pay_supplier_invoice,
-    record_supplier_invoice, reject_payment, reject_supplier_invoice, verify_payment,
+    record_supplier_invoice, reject_payment, reject_supplier_invoice, run_dispatch, verify_payment,
 )
 
 router = APIRouter(prefix="/staff", tags=["staff: payments"])
@@ -59,7 +59,9 @@ PAYMENT_PATH = Path(description="Payment number (1), order number (ORD-000005) o
 
 @router.post("/payments/{payment}/verify")
 def verify(body: VerifyBody, payment: str = PAYMENT_PATH) -> dict:
-    return _ok(verify_payment(payment=payment, verified_by=body.verified_by))
+    result = _ok(verify_payment(payment=payment, verified_by=body.verified_by))
+    result["dispatch"] = _ok(run_dispatch())
+    return result
 
 
 @router.post("/payments/{payment}/reject")

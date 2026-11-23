@@ -13,7 +13,7 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert
 
-from app.db.models import Customer, Inventory, PriceList, Product, Supplier, SupplierProduct
+from app.db.models import Customer, Inventory, PriceList, Product, Rider, Supplier, SupplierProduct
 from app.db.session import session_scope
 from app.phone import normalize_phone
 
@@ -24,10 +24,17 @@ PRICE_LISTS = [
 ]
 
 CUSTOMERS = [
-    ("Ali Traders", "+92 300 1234567", "B", "Shop 4 Saddar"),
-    ("Bismillah Store", "+92 321 5550192", "A", "Plot 12 Gulshan Block 5"),
-    ("Karachi Mart", "+92 345 2201876", "C", "Main Tariq Road"),
-    ("Madina General Store", "+92 312 4478210", "B", "Liaquatabad No. 10"),
+    ("Ali Traders", "+92 300 1234567", "B", "Shop 4 Saddar", "Saddar"),
+    ("Bismillah Store", "+92 321 5550192", "A", "Plot 12 Gulshan Block 5", "Gulshan"),
+    ("Karachi Mart", "+92 345 2201876", "C", "Main Tariq Road", "Tariq Road"),
+    ("Madina General Store", "+92 312 4478210", "B", "Liaquatabad No. 10", "Liaquatabad"),
+]
+
+RIDERS = [
+    ("Imran", "+92 300 5550101", "Saddar"),
+    ("Kashif", "+92 301 5550102", "Gulshan"),
+    ("Naveed", "+92 302 5550103", "Tariq Road"),
+    ("Yasir", "+92 303 5550104", "Liaquatabad"),
 ]
 
 # id, name, pack, unit, category, unit price Rs, physical, reorder level, search terms
@@ -71,7 +78,7 @@ SUPPLIER_PRODUCTS = [
 ]
 
 TRANSACTIONAL_TABLES = [
-    "supplier_invoices", "payments", "backorders", "purchase_order_items", "purchase_orders",
+    "deliveries", "supplier_invoices", "payments", "backorders", "purchase_order_items", "purchase_orders",
     "invoices", "order_items", "orders", "order_drafts",
     "staff_notifications", "workflow_logs", "messages",
 ]
@@ -107,8 +114,9 @@ def seed(reset: bool = False) -> None:
             s,
             Customer,
             [
-                {"name": n, "phone": normalize_phone(p), "price_category": c, "address": a, "is_active": True}
-                for n, p, c, a in CUSTOMERS
+                {"name": n, "phone": normalize_phone(p), "price_category": c, "address": a, "area": area,
+                 "is_active": True}
+                for n, p, c, a, area in CUSTOMERS
             ],
             ["phone"],
         )
@@ -145,8 +153,13 @@ def seed(reset: bool = False) -> None:
             for name, pid, prio, cost, lead, moq in SUPPLIER_PRODUCTS
         ], ["supplier_id", "product_id"])
 
+        rider_rows = [{"name": n, "phone": normalize_phone(p), "area": area, "capacity": 3, "active_count": 0,
+                       "is_on_duty": True} for n, p, area in RIDERS]
+        _upsert(s, Rider, rider_rows, ["phone"],
+                update_cols=None if reset else ["name", "area"])
+
     print(f"Seeded {len(PRICE_LISTS)} price lists, {len(CUSTOMERS)} customers, {len(PRODUCTS)} products, "
-          f"{len(SUPPLIERS)} suppliers" + (" (transactional data reset, stock restored)" if reset else ""))
+          f"{len(SUPPLIERS)} suppliers, {len(RIDERS)} riders" + (" (transactional data reset, stock restored)" if reset else ""))
 
 
 def main() -> None:

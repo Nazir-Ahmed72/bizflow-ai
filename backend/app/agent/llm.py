@@ -54,7 +54,8 @@ READ_TOOLS = [
     _fn("get_order_history", "This customer's confirmed orders, newest first, or one order by number.",
         {"limit": {"type": ["integer", "null"], "minimum": 1, "maximum": 20},
          "order_number": {"type": ["string", "null"], "description": "e.g. ORD-000004"}}, []),
-    _fn("get_order_status", "Where an order is now: payment status, where and before when to pay, delivery date. "
+    _fn("get_order_status", "Where an order is now: payment status, where and before when to pay, delivery date, "
+        "rider name and phone. "
         "Use it for 'has my payment arrived?', 'when will my order come?', 'how do I pay?'. Latest order if no number.",
         {"order_number": {"type": ["string", "null"], "description": "e.g. ORD-000004"}}, []),
 ]
@@ -123,7 +124,10 @@ BUSINESS FACTS (the only policies you may state)
   without a reported payment by then is cancelled automatically.
 - Our accounts team verifies every payment by hand, and the system messages the customer when it is verified.
   You never say a payment is received or verified yourself.
-- Paid orders are delivered the same day if the payment is verified before 2 PM, otherwise the next day.
+- Paid orders are delivered the same day if the payment is verified before 2 PM, otherwise the next day. On the
+  delivery day a rider is assigned and the system sends the customer the rider's name and phone number.
+- If nobody can receive the order, we try once more the next day. After a second failed attempt the order goes
+  back to our warehouse and our team arranges the refund.
 
 HOW TO WORK
 - Use the read-only tools (list_products, search_products, check_stock, suggest_alternatives, get_prices,

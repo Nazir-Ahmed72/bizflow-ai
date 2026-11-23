@@ -183,11 +183,8 @@ Implementation (`app/agent/`):
 6. ✅ FastAPI `/chat` endpoint
 7. ✅ Suppliers: reorder point, purchase orders with manager approval, receiving, backorders
 8. ✅ Payments: online advance payment verified by an accountant, 24h deadline, supplier invoices (three-way match)
-9. Delivery — next, after the user pushes 8. User's choices: riders by area first, then fewest deliveries today,
-   capacity 3, FIFO queue when full; delivery date = same day if paid before 2 PM PKT else next day (already set as
-   `orders.delivery_date` by verify_payment); NO OTP for now; failed delivery → retry once next day, then return
-   (stock released). Needs: riders, deliveries tables, customer area, order statuses assigned/out_for_delivery/
-   delivered/returned (CHECK migration), stock physical −= qty on delivery, rider endpoints, customer messages.
+9. ✅ Delivery: riders by area, capacity, FIFO queue, pickup/delivered/failed, retry once then return.
+   Next ideas (not started): OTP proof of delivery, COD/credit, WhatsApp, deployment.
 
 ## Procurement (suppliers) — `app/tools/procurement.py`
 
@@ -230,6 +227,29 @@ a human (accounts) verifies every payment; 24h deadline; supplier bills need thr
   that happened while the customer was away. AgentReply.status stays `confirmed` after "yes".
 - notify_staff roles: sales, warehouse, manager, accounts.
 
+## Delivery — `app/tools/delivery.py`, `app/api/delivery.py`
+
+User's choices: same area first, then fewest deliveries today, capacity 3, FIFO queue when full; delivery date =
+same day if paid before 2 PM PKT else next day; NO OTP; failed → retry once next day, then return.
+- Migration `598f214e5b63` (hand-edited CHECK: orders.status + out_for_delivery/delivered/returned; queues a
+  delivery for existing ready_to_dispatch orders). `customers.area`; `riders` (capacity, active_count ≤ capacity,
+  is_on_duty); `deliveries` (one row per attempt 1|2, status queued/assigned/out_for_delivery/delivered/failed,
+  CHECK rider_id NULL ⇔ queued, partial unique: one open delivery per order).
+- `verify_payment` inserts the queued delivery (scheduled_date = delivery_date) in its transaction; it does NOT
+  dispatch (payments.py must not import delivery.py). `POST /staff/payments/{p}/verify` then calls `run_dispatch`.
+- `run_dispatch(today?)`: advisory lock 'dispatch'; queued with scheduled_date ≤ today, FIFO; candidates ordered by
+  same area, deliveries today, id; atomic claim `UPDATE riders SET active_count+1 WHERE on duty AND < capacity`;
+  messages the customer; stops at the first delivery nobody can take (everyone full) → notifies warehouse.
+- `pickup_delivery` (assigned → out_for_delivery, order too), `complete_delivery` (stock `release_reservation(...,
+  shipped=True)` = physical and reserved −= qty; rider slot freed; re-dispatch), `fail_delivery` (attempt 1 → new
+  queued attempt tomorrow, order back to ready_to_dispatch; attempt 2 → order `returned`, reservation released,
+  accounts notified for the refund). Rider must own the delivery (`NOT_YOUR_DELIVERY`). `set_rider_duty` (off with
+  active deliveries → `RIDER_BUSY`; on → dispatch). Job: `python -m app.jobs dispatch`.
+- Customer message templates (en/roman_ur/ur) in `delivery.MESSAGES`, shared helpers `tell_customer`,
+  `order_thread`, `order_language`, `rs_text`, `PKT` live in payments.py.
+- `get_order_status` adds rider_name/phone, delivery_attempt, last_failure; open orders exclude delivered/returned.
+- Seed riders: Imran Saddar, Kashif Gulshan, Naveed Tariq Road, Yasir Liaquatabad (reset sets active_count 0).
+
 ## API (`app/api/main.py`)
 
 - `create_app(llm=None)` app factory (tests inject `FakeLLM`); module-level `app = create_app()` for uvicorn. `lifespan` opens `postgres_checkpointer()` and stores `OrderAgent` on `app.state.agent`; endpoints get it via `Depends(get_agent)`. Endpoints are sync `def` (blocking DB + LLM work runs in FastAPI's thread pool).
@@ -258,6 +278,7 @@ python -m app.cli --phone "+92 300 1234567"                      # live chat (Gr
 python -m app.cli --phone "+92 300 1234567" --test-db --seed-reset -m "10 cartons dalda" -m "yes"
 python -m app.cli --phone "+92 300 1234567" --reset-thread       # forget conversation state
 python -m app.jobs payment-deadline [--test-db]                  # cancel unpaid orders (run hourly)
+python -m app.jobs dispatch [--test-db]                          # assign today's deliveries to riders
 uvicorn app.api.main:app --reload                                # API on http://127.0.0.1:8000 (docs at /docs)
 $env:USE_TEST_DB="1"; uvicorn app.api.main:app                   # API on the test branch
 ```

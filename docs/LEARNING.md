@@ -266,7 +266,60 @@ webhook would simply call `verify_payment` with `verified_by="gateway"`; everyth
 
 ---
 
-## 12. Testing an LLM app
+## 12. Delivery: dispatching riders
+
+**Idea.** Delivery is a small **scheduling and resource-allocation** problem: a queue of jobs (paid orders), a pool
+of workers with limited capacity (riders, 3 deliveries each) and rules for matching them. It is also the last
+step of order-to-cash, where the reserved stock finally leaves the warehouse.
+
+**Concepts, and where they live** ([delivery.py](../backend/app/tools/delivery.py),
+[api/delivery.py](../backend/app/api/delivery.py)):
+
+| Concept | What it means | In this project |
+|---|---|---|
+| **Dispatch** | Matching waiting jobs to free workers | `run_dispatch`: after a verified payment, when a rider finishes, comes on duty, and as a job |
+| **FIFO queue** | First paid, first served | queued deliveries ordered by `scheduled_date, queued_at, id` |
+| **Zone-based assignment** | Riders who know the area are faster | candidates sorted by `rider.area = customer.area` first |
+| **Load balancing** | Spread work fairly | then by number of deliveries the rider has today |
+| **Capacity + compare-and-set** | Never more than 3 at a time | `UPDATE riders SET active_count = active_count + 1 WHERE ... AND active_count < capacity`: rowcount 0 = someone else took the slot |
+| **One row per attempt** | History of every try, not overwritten | `deliveries.attempt` 1 or 2; a failure creates attempt 2 for tomorrow |
+| **Physical vs reserved stock** | Reserved = promised; physical = on the shelf | delivered: both go down; cancelled/returned: only reserved goes down |
+| **Proactive notifications** | The system writes first | assigned / on its way / delivered / retry / returned messages in the customer's language |
+
+**Why the reorder check isn't triggered by delivery.** The reorder position is physical − reserved + on order. A
+delivery lowers physical *and* reserved by the same amount, so the position doesn't change. The stock was already
+"used up" when it was reserved, which is exactly why §10 counts reservations.
+
+**The same compare-and-set pattern, a third time.** Stock reservation (`physical - reserved >= qty`), purchase
+order transitions (`FOR UPDATE` + status check) and rider capacity (`active_count < capacity`) all use the same
+idea: put the rule *in the UPDATE's WHERE clause* and check how many rows changed. The database then enforces
+the rule even when two requests arrive at the same millisecond. A CHECK constraint
+(`active_count <= capacity`) is the last line of defence if code ever gets it wrong.
+
+**Two kinds of locks here.**
+- `pg_advisory_xact_lock('dispatch')`: only one dispatch run at a time, so two runs can't both hand the same
+  queued order to different riders.
+- Row locks (`FOR UPDATE`) on the delivery a rider is updating, so "delivered" and "failed" can't both win.
+
+**Separation of concerns: verifying ≠ dispatching.** `verify_payment` only records the money and queues the
+delivery. The endpoint (and the `dispatch` job) then call `run_dispatch`. Keeping them apart avoids a circular
+import (payments ↔ delivery). It also means a slow or failing dispatch can never undo a verified payment.
+
+**Dates vs times.** "Delivery day" is a `date` in Karachi time (`today_pkt()`), while events (`assigned_at`, ...)
+are UTC timestamps. `run_dispatch(today=...)` lets tests pretend it's tomorrow without changing the clock. This is
+called **dependency injection of time**, and it's the standard way to test date logic.
+
+**Read.**
+- Vehicle routing / dispatch problems (where real systems go next): https://en.wikipedia.org/wiki/Vehicle_routing_problem
+- Compare-and-swap (the idea behind the guarded UPDATE): https://en.wikipedia.org/wiki/Compare-and-swap
+- FIFO queues: https://en.wikipedia.org/wiki/FIFO_(computing_and_electronics)
+- Load balancing: https://en.wikipedia.org/wiki/Load_balancing_(computing)
+- PostgreSQL `UPDATE` and row counts: https://www.postgresql.org/docs/current/sql-update.html
+- Testing code that depends on time ("inject the clock"): https://martinfowler.com/bliki/ClockWrapper.html
+
+---
+
+## 13. Testing an LLM app
 
 **Idea.** You can't test "is the model smart?" with exact assertions, but you *can* test everything around it. The scenario tests use a **scripted fake LLM** that says "for 'yes', call `confirm_pending_order`". Everything after that decision is real code on a real (test) database. A separate live test checks the real model, only when you ask (`RUN_LIVE_LLM=1`), because it costs tokens.
 

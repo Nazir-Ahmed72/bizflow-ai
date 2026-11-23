@@ -240,11 +240,12 @@ def confirm_order(p: ConfirmOrderInput) -> Union[ConfirmOrderOutput, ToolError]:
         raise
 
 
-def release_reservation(s: Session, order: Order) -> None:
+def release_reservation(s: Session, order: Order, shipped: bool = False) -> None:
+    sql = ("UPDATE inventory SET reserved = reserved - :qty, physical = physical - :qty, updated_at = now() "
+           if shipped else "UPDATE inventory SET reserved = reserved - :qty, updated_at = now() ")
     for item in sorted(order.items, key=lambda i: i.product_id):
         res = s.execute(
-            text("UPDATE inventory SET reserved = reserved - :qty, updated_at = now() "
-                 "WHERE product_id = :pid AND reserved >= :qty"),
+            text(sql + "WHERE product_id = :pid AND reserved >= :qty"),
             {"qty": item.qty, "pid": item.product_id},
         )
         if res.rowcount != 1:
@@ -417,7 +418,7 @@ def get_customer_profile(p: GetCustomerProfileInput) -> Union[GetCustomerProfile
         open_orders = [OpenOrder(order_number=o.order_number, status=o.status, total=o.total,
                                  payment_due_at=o.payment_due_at, payment_status=latest_payment_status(s, o.id),
                                  delivery_date=o.delivery_date)
-                       for o in orders[:10] if o.status != "cancelled"][:5]
+                       for o in orders[:10] if o.status not in ("cancelled", "delivered", "returned")][:5]
     stats: dict[str, dict] = {}
     for order in orders:
         for item in order.items:

@@ -61,6 +61,7 @@ class Customer(Base):
     phone: Mapped[str] = mapped_column(String(20), nullable=False, unique=True)  # E.164, see app.phone
     price_category: Mapped[str] = mapped_column(ForeignKey("price_lists.category"), nullable=False)
     address: Mapped[str] = mapped_column(String(255), nullable=False)
+    area: Mapped[Optional[str]] = mapped_column(String(40))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     created_at: Mapped[datetime] = _now_col()
 
@@ -114,7 +115,7 @@ class Inventory(Base):
 # --------------------------------------------------------------------------- ordering
 
 DRAFT_STATUSES = ("pending", "confirmed", "cancelled", "expired")
-ORDER_STATUSES = ("awaiting_payment", "ready_to_dispatch", "cancelled")
+ORDER_STATUSES = ("awaiting_payment", "ready_to_dispatch", "out_for_delivery", "delivered", "returned", "cancelled")
 
 
 class OrderDraft(Base):
@@ -449,3 +450,52 @@ class SupplierInvoice(Base):
 
     supplier: Mapped[Supplier] = relationship()
     purchase_order: Mapped[PurchaseOrder] = relationship()
+
+
+DELIVERY_STATUSES = ("queued", "assigned", "out_for_delivery", "delivered", "failed")
+OPEN_DELIVERY_STATUSES = ("queued", "assigned", "out_for_delivery")
+
+
+class Rider(Base):
+    __tablename__ = "riders"
+    __table_args__ = (
+        CheckConstraint("capacity >= 1", name="ck_riders_capacity_positive"),
+        CheckConstraint("active_count >= 0 AND active_count <= capacity", name="ck_riders_active_range"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    phone: Mapped[str] = mapped_column(String(20), nullable=False, unique=True)
+    area: Mapped[str] = mapped_column(String(40), nullable=False)
+    capacity: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3")
+    active_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    is_on_duty: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+
+
+class Delivery(Base):
+    __tablename__ = "deliveries"
+    __table_args__ = (
+        CheckConstraint(f"status IN {DELIVERY_STATUSES}", name="ck_deliveries_status"),
+        CheckConstraint("attempt IN (1, 2)", name="ck_deliveries_attempt"),
+        CheckConstraint("(status = 'queued') = (rider_id IS NULL)", name="ck_deliveries_rider_when_assigned"),
+        UniqueConstraint("order_id", "attempt", name="uq_deliveries_order_attempt"),
+        Index("uq_deliveries_one_open_per_order", "order_id", unique=True,
+              postgresql_where=text("status IN ('queued', 'assigned', 'out_for_delivery')")),
+        Index("ix_deliveries_status_date", "status", "scheduled_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), nullable=False, index=True)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    rider_id: Mapped[Optional[int]] = mapped_column(ForeignKey("riders.id"), index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="queued")
+    scheduled_date: Mapped[date] = mapped_column(Date, nullable=False)
+    queued_at: Mapped[datetime] = _now_col()
+    assigned_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    picked_up_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    failed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[Optional[str]] = mapped_column(Text)
+
+    order: Mapped[Order] = relationship()
+    rider: Mapped[Optional[Rider]] = relationship()

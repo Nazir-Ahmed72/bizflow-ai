@@ -40,7 +40,20 @@ def payment_deadline() -> int:
     return 0
 
 
-JOBS = {"reorder-check": reorder_check, "payment-deadline": payment_deadline}
+def dispatch() -> int:
+    from app.tools import run_dispatch
+
+    result = run_dispatch()
+    if not result.success:
+        print(f"dispatch failed: {result.error_code} {result.message}")
+        return 1
+    for d in result.assigned:
+        print(f"  {d.order_number} ({d.customer_name}, {d.area}) -> {d.rider_name}")
+    print(f"assigned {len(result.assigned)} delivery(ies); {result.still_waiting_today} still waiting for a free rider")
+    return 0
+
+
+JOBS = {"reorder-check": reorder_check, "payment-deadline": payment_deadline, "dispatch": dispatch}
 
 
 def main() -> None:

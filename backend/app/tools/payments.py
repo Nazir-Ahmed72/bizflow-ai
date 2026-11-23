@@ -9,7 +9,7 @@ from sqlalchemy import exists, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.db.models import Backorder, Order, OrderDraft, Payment
+from app.db.models import Backorder, Delivery, Order, OrderDraft, Payment
 from app.db.session import session_scope
 from app.tools.base import Abort, ErrorCode, ToolError, ToolOk, fail, tool
 from app.tools.notify import notify_staff, record_message
@@ -48,7 +48,7 @@ def _day_words(delivery: date, paid_at: datetime, lang: str) -> str:
     return f"{words[0] if today else words[1]} ({delivery:%d %b})"
 
 
-def _rs(amount: Decimal) -> str:
+def rs_text(amount: Decimal) -> str:
     return f"Rs {int(amount):,}" if amount == amount.to_integral_value() else f"Rs {amount:,.2f}"
 
 
@@ -80,13 +80,17 @@ MESSAGES = {
 }
 
 
-def _order_language(s: Session, order: Order) -> str:
+def order_language(s: Session, order: Order) -> str:
     return s.scalar(select(OrderDraft.language).where(OrderDraft.id == order.draft_id)) or "en"
 
 
-def _tell_customer(s: Session, order: Order, thread_id: str, kind: str, **values: str) -> str:
-    lang = _order_language(s, order)
-    text = MESSAGES[kind].get(lang, MESSAGES[kind]["en"]).format(order=order.order_number, **values)
+def order_thread(s: Session, order: Order) -> str:
+    return s.scalar(select(OrderDraft.thread_id).where(OrderDraft.id == order.draft_id))
+
+
+def tell_customer(s: Session, order: Order, thread_id: str, template: dict[str, str], **values: str) -> str:
+    lang = order_language(s, order)
+    text = template.get(lang, template["en"]).format(order=order.order_number, **values)
     record_message(thread_id, "out", text, order.customer_id, session=s)
     return text
 
@@ -198,7 +202,7 @@ def submit_payment(p: SubmitPaymentInput) -> Union[SubmitPaymentOutput, ToolErro
         return fail(ErrorCode.DUPLICATE_REFERENCE,
                     f"Transaction reference {p.reference} was already used for another payment.")
     notify_staff("accounts", f"Verify payment #{summary.payment_id}: {summary.customer_name} says they paid "
-                             f"{_rs(summary.amount)} for {summary.order_number} by {summary.method}, "
+                             f"{rs_text(summary.amount)} for {summary.order_number} by {summary.method}, "
                              f"reference {summary.reference}.")
     return SubmitPaymentOutput(already_submitted=False, payment=summary)
 
@@ -293,8 +297,9 @@ def verify_payment(p: VerifyPaymentInput) -> Union[ReviewOutput, ToolError]:
         now = _now()
         payment.status, payment.reviewed_by, payment.reviewed_at = "verified", p.verified_by, now
         order.status, order.paid_at, order.delivery_date = "ready_to_dispatch", now, delivery_date_for(now)
-        text = _tell_customer(s, order, payment.thread_id, "verified", amount=_rs(order.total),
-                              day=_day_words(order.delivery_date, now, _order_language(s, order)),
+        s.add(Delivery(order_id=order.id, attempt=1, status="queued", scheduled_date=order.delivery_date))
+        text = tell_customer(s, order, payment.thread_id, MESSAGES["verified"], amount=rs_text(order.total),
+                              day=_day_words(order.delivery_date, now, order_language(s, order)),
                               address=payment.customer.address)
         s.flush()
         summary = _summary(payment)
@@ -322,9 +327,9 @@ def reject_payment(p: RejectPaymentInput) -> Union[ReviewOutput, ToolError]:
             payment.rejected_reason = p.reason
             if order.status == "awaiting_payment" and order.payment_due_at and order.payment_due_at <= now:
                 _cancel(s, order, f"payment rejected after the deadline: {p.reason}")
-                text = _tell_customer(s, order, payment.thread_id, "cancelled")
+                text = tell_customer(s, order, payment.thread_id, MESSAGES["cancelled"])
             else:
-                text = _tell_customer(s, order, payment.thread_id, "rejected", reference=payment.reference,
+                text = tell_customer(s, order, payment.thread_id, MESSAGES["rejected"], reference=payment.reference,
                                       reason=p.reason, deadline=local_time_text(order.payment_due_at or now))
             s.flush()
             summary = _summary(payment)
@@ -373,8 +378,7 @@ def cancel_unpaid_orders(p: CancelUnpaidInput) -> Union[CancelUnpaidOutput, Tool
                 if order.status != "awaiting_payment" or still_live is not None:
                     continue
                 _cancel(s, order, "no payment within 24 hours")
-                thread = s.scalar(select(OrderDraft.thread_id).where(OrderDraft.id == order.draft_id))
-                _tell_customer(s, order, thread, "cancelled")
+                tell_customer(s, order, order_thread(s, order), MESSAGES["cancelled"])
                 cancelled.append(CancelledOrder(order_number=order.order_number, customer_id=order.customer_id,
                                                 payment_due_at=order.payment_due_at))
             stale = list(s.scalars(select(Payment).where(Payment.status == "pending_verification",
@@ -403,6 +407,10 @@ class OrderStatusOutput(ToolOk):
     pay_before: Optional[str] = None
     pay_to: Optional[dict] = None
     delivery_date: Optional[str] = None
+    delivery_attempt: Optional[int] = None
+    rider_name: Optional[str] = None
+    rider_phone: Optional[str] = None
+    last_failure: Optional[str] = None
     cancel_reason: Optional[str] = None
     meaning: Optional[str] = None
 
@@ -414,7 +422,12 @@ STATUS_MEANING = {
                                              "The customer will get a message as soon as it is verified.",
     "awaiting_payment+rejected": "The last payment could not be verified; the customer should send the correct "
                                  "transaction ID before pay_before.",
-    "ready_to_dispatch": "Paid and confirmed. It will be delivered on delivery_date.",
+    "ready_to_dispatch": "Paid and confirmed. It will be delivered on delivery_date; a rider is assigned that day.",
+    "ready_to_dispatch+assigned": "Paid. Rider rider_name (rider_phone) will deliver it on delivery_date.",
+    "ready_to_dispatch+retry": "The first delivery attempt failed (last_failure). We will try again on delivery_date.",
+    "out_for_delivery": "On the way now with rider rider_name (rider_phone).",
+    "delivered": "Delivered.",
+    "returned": "Delivery failed twice, so the order went back to the warehouse; our team arranges the refund.",
     "cancelled": "The order was cancelled (see cancel_reason).",
 }
 
@@ -429,15 +442,28 @@ def get_order_status(p: OrderStatusInput) -> Union[OrderStatusOutput, ToolError]
         if order is None:
             return OrderStatusOutput(found=False)
         payment_status = latest_payment_status(s, order.id)
+        delivery = s.scalar(select(Delivery).where(Delivery.order_id == order.id)
+                            .options(selectinload(Delivery.rider)).order_by(Delivery.id.desc()).limit(1))
+        failed = s.scalar(select(Delivery.failure_reason).where(Delivery.order_id == order.id,
+                                                                Delivery.status == "failed")
+                          .order_by(Delivery.id.desc()).limit(1))
         key = order.status
         if order.status == "awaiting_payment" and payment_status in ("pending_verification", "rejected"):
             key = f"{order.status}+{payment_status}"
+        elif order.status == "ready_to_dispatch" and delivery is not None:
+            if delivery.status == "assigned":
+                key = "ready_to_dispatch+assigned"
+            elif delivery.attempt > 1:
+                key = "ready_to_dispatch+retry"
         unpaid = order.status == "awaiting_payment"
+        rider = delivery.rider if delivery is not None and delivery.status in ("assigned", "out_for_delivery") else None
         return OrderStatusOutput(
             found=True, order_number=order.order_number, status=order.status, total=order.total,
             payment_status=payment_status,
             pay_before=local_time_text(order.payment_due_at) if unpaid and order.payment_due_at else None,
             pay_to=PAY_TO if unpaid else None,
             delivery_date=f"{order.delivery_date:%d %b %Y}" if order.delivery_date else None,
-            cancel_reason=order.cancel_reason, meaning=STATUS_MEANING[key],
+            delivery_attempt=delivery.attempt if delivery is not None else None,
+            rider_name=rider.name if rider else None, rider_phone=rider.phone if rider else None,
+            last_failure=failed, cancel_reason=order.cancel_reason, meaning=STATUS_MEANING[key],
         )
