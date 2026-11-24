@@ -8,4 +8,6 @@ backend/tests/
 backend/pytest.ini
 
 
-nCLAUDE.md`ndocs/`npyrightconfig.json
+CLAUDE.md
+docs/
+pyrightconfig.json
