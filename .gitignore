@@ -6,3 +6,6 @@ __pycache__/
 *.egg-info/
 backend/tests/
 backend/pytest.ini
+
+
+nCLAUDE.md`ndocs/`npyrightconfig.json
