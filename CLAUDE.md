@@ -5,7 +5,7 @@ Customers send order messages. The agent identifies the customer, finds products
 checks stock, gets prices and asks for confirmation. Then it creates the order,
 reserves stock and issues an invoice.
 
-**Current phase: backend + agent orchestration only. No frontend.**
+**Frontend: a Streamlit dashboard (`dashboard/`) that only calls the API over HTTP. Backend stays the source of truth.**
 
 ## Stack
 
@@ -250,6 +250,23 @@ same day if paid before 2 PM PKT else next day; NO OTP; failed → retry once ne
 - `get_order_status` adds rider_name/phone, delivery_attempt, last_failure; open orders exclude delivered/returned.
 - Seed riders: Imran Saddar, Kashif Gulshan, Naveed Tariq Road, Yasir Liaquatabad (reset sets active_count 0).
 
+## Dashboard — `dashboard/` (Streamlit, repo root)
+
+User's choice: Streamlit; main page = customer chatting with the bot; client page with their orders; manager page
+with payments + company inventory; delivery page. It NEVER imports backend code: `dashboard/api.py` (httpx,
+`BIZFLOW_API` env, default http://127.0.0.1:8000, `SHOPS` demo phones, `rs()`, `run()` = call + toast/error).
+- `app.py` = `st.navigation` (Customer: chat, my_orders; Company: manager, delivery) + API health in the sidebar.
+- `pages/chat.py`: history from `GET /conversations/{phone}`, send via `POST /chat`, right column = trace of the
+  last run (`GET /conversations/{phone}/trace?run_id=`; `/chat` returns `run_id`, logs are buffered so they exist
+  after the response).
+- Backend read helpers for it (plain functions, NOT `@tool`, so dashboard refreshes don't flood workflow_logs):
+  `notify.workflow_trace`, `notify.list_notifications`, `notify.resolve_notification`, `orders.customer_overview`,
+  `procurement.inventory_report`. Endpoints: `/conversations/{phone}/trace`, `/customers/{phone}`,
+  `/staff/inventory`, `/staff/notifications[/{id}/resolve]`.
+- Use `width="stretch"` (not `use_container_width`, deprecated in Streamlit 1.65). Smoke-test pages with
+  `streamlit.testing.v1.AppTest` against `USE_TEST_DB=1 uvicorn ... --port 8765` (see conversation history).
+- Run: `streamlit run dashboard/app.py` (after `uvicorn app.api.main:app` in backend/).
+
 ## API (`app/api/main.py`)
 
 - `create_app(llm=None)` app factory (tests inject `FakeLLM`); module-level `app = create_app()` for uvicorn. `lifespan` opens `postgres_checkpointer()` and stores `OrderAgent` on `app.state.agent`; endpoints get it via `Depends(get_agent)`. Endpoints are sync `def` (blocking DB + LLM work runs in FastAPI's thread pool).
@@ -280,6 +297,7 @@ python -m app.cli --phone "+92 300 1234567" --reset-thread       # forget conver
 python -m app.jobs payment-deadline [--test-db]                  # cancel unpaid orders (run hourly)
 python -m app.jobs dispatch [--test-db]                          # assign today's deliveries to riders
 uvicorn app.api.main:app --reload                                # API on http://127.0.0.1:8000 (docs at /docs)
+streamlit run ..\dashboard\app.py                                # dashboard on http://localhost:8501 (2nd terminal)
 $env:USE_TEST_DB="1"; uvicorn app.api.main:app                   # API on the test branch
 ```
 

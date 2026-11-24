@@ -437,3 +437,21 @@ def create_backorders(p: CreateBackordersInput) -> Union[CreateBackordersOutput,
         s.add_all(rows)
         s.flush()
         return CreateBackordersOutput(backorder_ids=[r.id for r in rows])
+
+
+def inventory_report() -> list[dict]:
+    with session_scope() as s:
+        extra = {pid: (cat, price, pack) for pid, cat, price, pack in
+                 s.execute(select(Product.id, Product.category, Product.unit_price, Product.pack)).all()}
+        report = []
+        for row in _inventory_positions(s, None):
+            category, price, pack = extra[row.id]
+            position = row.physical - row.reserved + int(row.on_order)
+            report.append({
+                "product_id": row.id, "name": row.name, "category": category, "pack": pack, "unit_price": price,
+                "physical": row.physical, "reserved": row.reserved, "available": row.physical - row.reserved,
+                "on_order": int(row.on_order), "position": position, "reorder_level": row.reorder_level,
+                "max_level": row.max_level, "needs_reorder": position <= row.reorder_level,
+                "stock_value": price * row.physical,
+            })
+    return report

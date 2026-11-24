@@ -42,6 +42,7 @@ class AgentReply:
     status: Optional[str] = None
     order_number: Optional[str] = None
     invoice_number: Optional[str] = None
+    run_id: Optional[str] = None
 
 
 def thread_id_for(phone: str) -> str:
@@ -92,7 +93,7 @@ class OrderAgent:
                 notify_staff("manager", f"Order bot crashed on {thread_id}: {type(exc).__name__}: {exc}")
                 msg = backup("error", {})
                 record_message(thread_id, "out", msg, customer_id)
-                return AgentReply(thread_id=thread_id, messages=[msg], status="error")
+                return AgentReply(thread_id=thread_id, messages=[msg], status="error", run_id=run_id)
 
             after = self.graph.get_state(config)
             state = after.values or {}
@@ -110,7 +111,7 @@ class OrderAgent:
             return AgentReply(thread_id=thread_id, messages=messages, waiting_for=waiting_for,
                               status=state.get("status"),
                               order_number=(state.get("order") or {}).get("order_number"),
-                              invoice_number=(state.get("invoice") or {}).get("invoice_number"))
+                              invoice_number=(state.get("invoice") or {}).get("invoice_number"), run_id=run_id)
 
     def reset_thread(self, phone: str) -> None:
         """Forget the conversation state for this phone (orders in the DB are untouched)."""

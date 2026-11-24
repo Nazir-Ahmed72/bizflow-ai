@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from app.db.models import Message, StaffNotification
+from app.db.models import Message, StaffNotification, WorkflowLog
 from app.db.session import get_engine, session_scope
 from app.tools.base import ToolError, ToolOk, current_log_context, tool
 
@@ -74,3 +74,36 @@ def recent_messages(thread_id: str, limit: int = 10, after_id: int = 0) -> list[
         rows = list(s.scalars(select(Message).where(Message.thread_id == thread_id, Message.id > after_id)
                               .order_by(Message.id.desc()).limit(limit)))
     return [{"id": m.id, "direction": m.direction, "text": m.text} for m in reversed(rows)]
+
+
+def workflow_trace(thread_id: str, run_id: Optional[str] = None, limit: int = 300) -> dict:
+    with session_scope() as s:
+        if run_id is None:
+            run_id = s.scalar(select(WorkflowLog.run_id).where(WorkflowLog.thread_id == thread_id,
+                                                               WorkflowLog.run_id.is_not(None))
+                              .order_by(WorkflowLog.id.desc()).limit(1))
+        rows = list(s.scalars(select(WorkflowLog).where(WorkflowLog.thread_id == thread_id,
+                                                        WorkflowLog.run_id == run_id)
+                              .order_by(WorkflowLog.id).limit(limit))) if run_id else []
+        steps = [{"id": r.id, "kind": r.kind, "step": r.step, "input": r.input, "output": r.output,
+                  "success": r.success, "error_code": r.error_code, "duration_ms": r.duration_ms,
+                  "created_at": r.created_at} for r in rows]
+    return {"thread_id": thread_id, "run_id": run_id, "steps": steps}
+
+
+def list_notifications(status: Optional[str] = "open", limit: int = 50) -> list[dict]:
+    with session_scope() as s:
+        q = select(StaffNotification).order_by(StaffNotification.id.desc()).limit(limit)
+        if status:
+            q = q.where(StaffNotification.status == status)
+        return [{"id": n.id, "role": n.role, "reason": n.reason, "thread_id": n.thread_id, "status": n.status,
+                 "created_at": n.created_at} for n in s.scalars(q)]
+
+
+def resolve_notification(notification_id: int) -> Optional[dict]:
+    with session_scope() as s:
+        n = s.get(StaffNotification, notification_id, with_for_update=True)
+        if n is None:
+            return None
+        n.status = "resolved"
+        return {"id": n.id, "role": n.role, "reason": n.reason, "status": n.status}

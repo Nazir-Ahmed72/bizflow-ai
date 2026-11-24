@@ -15,10 +15,13 @@ from app.tools.base import ErrorCode, ToolError, log_context, log_event
 from app.tools.catalog import (
     check_stock, get_prices, identify_customer, list_products, search_products, suggest_alternatives,
 )
-from app.tools.notify import ConversationBusy, conversation_lock, notify_staff, recent_messages, record_message
+from app.tools.notify import (
+    ConversationBusy, conversation_lock, list_notifications, notify_staff, recent_messages, record_message,
+    resolve_notification, workflow_trace,
+)
 from app.tools.orders import (
-    cancel_draft, confirm_order, create_draft, generate_invoice, get_customer_profile, get_order_history,
-    idempotency_key_for,
+    cancel_draft, confirm_order, create_draft, customer_overview, generate_invoice, get_customer_profile,
+    get_order_history, idempotency_key_for,
 )
 from app.tools.delivery import (
     complete_delivery, fail_delivery, list_deliveries, list_riders, pickup_delivery, run_dispatch, set_rider_duty,
@@ -33,7 +36,8 @@ from app.tools.payments import (
     verify_payment,
 )
 from app.tools.procurement import (
-    approve_purchase_order, create_backorders, get_purchase_order, get_restock_eta, list_purchase_orders,
+    approve_purchase_order, create_backorders, get_purchase_order, get_restock_eta, inventory_report,
+    list_purchase_orders,
     receive_purchase_order, reject_purchase_order, run_reorder_check, send_purchase_order,
 )
 
@@ -49,6 +53,7 @@ __all__ = [
     "list_supplier_invoices",
     "run_dispatch", "pickup_delivery", "complete_delivery", "fail_delivery", "list_riders", "set_rider_duty",
     "list_deliveries", "today_pkt",
+    "workflow_trace", "list_notifications", "resolve_notification", "customer_overview", "inventory_report",
     "idempotency_key_for", "record_message", "recent_messages", "conversation_lock", "ConversationBusy",
     "log_event", "log_context",
     "ErrorCode", "ToolError",

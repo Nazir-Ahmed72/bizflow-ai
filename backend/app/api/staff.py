@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.tools import (
-    ErrorCode, approve_purchase_order, get_purchase_order, list_purchase_orders, receive_purchase_order,
+    ErrorCode, inventory_report, list_notifications, resolve_notification, approve_purchase_order, get_purchase_order, list_purchase_orders, receive_purchase_order,
     reject_purchase_order, run_reorder_check, send_purchase_order,
 )
 
@@ -98,3 +98,23 @@ def send(po_number: str) -> dict:
 def receive(po_number: str, body: ReceiveBody) -> dict:
     return _ok(receive_purchase_order(po_number=po_number, received_by=body.received_by,
                                       items=[i.model_dump() for i in body.items]))
+
+
+@router.get("/inventory")
+def inventory() -> dict:
+    rows = inventory_report()
+    return {"count": len(rows), "products": rows}
+
+
+@router.get("/notifications")
+def notifications(status: Optional[str] = "open", limit: int = 50) -> dict:
+    rows = list_notifications(status=status or None, limit=min(max(limit, 1), 200))
+    return {"count": len(rows), "notifications": rows}
+
+
+@router.post("/notifications/{notification_id}/resolve")
+def resolve(notification_id: int) -> dict:
+    row = resolve_notification(notification_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail={"error_code": "NOT_FOUND", "message": "No such notification."})
+    return row

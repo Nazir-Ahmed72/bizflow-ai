@@ -107,6 +107,7 @@ The AI understands and talks; the business system decides and records.
 ```mermaid
 flowchart TB
     subgraph Clients
+        Dash["Web dashboard (Streamlit)<br/>customer chat, my orders,<br/>payments & inventory, delivery"]
         CLI["CLI chat"]
         API["REST API<br/>POST /chat"]
         Staff["Staff endpoints<br/>manager, accounts, storekeeper, dispatcher"]
@@ -133,6 +134,8 @@ flowchart TB
         Checkpoints[("conversation state<br/>per customer")]
     end
 
+    Dash -- HTTP --> API
+    Dash -- HTTP --> Staff
     CLI --> Service
     API --> Service
     Future -.-> API
@@ -149,6 +152,30 @@ flowchart TB
     Write --> Business
     Write --> Audit
     Service --> Checkpoints
+```
+
+---
+
+## Dashboard
+
+A web dashboard (Streamlit) that talks to the API over HTTP, exactly like a real WhatsApp or back-office client
+would:
+
+| Page | Who it's for | What it shows |
+|---|---|---|
+| **Chat with the bot** | a shopkeeper | the conversation, and next to it *what the server did* for the last message: every AI decision, tool call (with input and output), safety check and timing |
+| **My orders** | a shopkeeper | their details, every order with items, payment status, delivery date and rider |
+| **Payments & inventory** | accounts and the manager | payments to verify, stock (physical, reserved, available, on order, reorder warnings), purchase orders, supplier bills, staff notifications |
+| **Delivery** | the dispatcher and riders | riders and their load, dispatch, and a simulated rider app (picked up / delivered / could not deliver) |
+
+```mermaid
+flowchart LR
+    UI["Streamlit pages"] -- "POST /chat" --> API["FastAPI"]
+    UI -- "GET /conversations/{phone}/trace" --> API
+    UI -- "/staff/..., /riders/..." --> API
+    API --> Agent["LangGraph agent"] --> LLM["Groq LLM"]
+    Agent --> Tools["business tools"] --> DB[("PostgreSQL")]
+    Tools -. "every call logged" .-> DB
 ```
 
 ---
@@ -552,6 +579,7 @@ notifications for staff.
 | API | FastAPI |
 | Database | PostgreSQL on Neon, SQLAlchemy 2.0, Alembic |
 | Validation | Pydantic |
+| Dashboard | Streamlit (calls the API over HTTP) |
 
 ---
 
@@ -581,6 +609,14 @@ Or run the API (interactive docs at http://127.0.0.1:8000/docs):
 uvicorn app.api.main:app --reload
 ```
 
+And the dashboard, in a second terminal from the repository root (opens http://localhost:8501):
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+pip install -r dashboard/requirements.txt
+streamlit run dashboard/app.py
+```
+
 **Demo shops:** Ali Traders `+92 300 1234567` (2% discount), Bismillah Store `+92 321 5550192` (3%),
 Karachi Mart `+92 345 2201876` (no discount), Madina General Store `+92 312 4478210` (2%).
 **Demo riders:** Imran (Saddar), Kashif (Gulshan), Naveed (Tariq Road), Yasir (Liaquatabad), 3 deliveries at a time.
@@ -595,6 +631,10 @@ Karachi Mart `+92 345 2201876` (no discount), Madina General Store `+92 312 4478
 | `POST` | `/chat` | send a customer message, get the assistant's replies |
 | `GET` | `/conversations/{phone}` | a customer's chat history and what the assistant is waiting for |
 | `GET` | `/health` | service status |
+| `GET` | `/conversations/{phone}/trace?run_id=` | what the server did for one message: AI calls, tool calls, safety checks |
+| `GET` | `/customers/{phone}` | a shop's details and orders (payment, delivery, rider) |
+| `GET` | `/staff/inventory` | stock per product: physical, reserved, available, on order, reorder flag |
+| `GET` / `POST` | `/staff/notifications` · `/{id}/resolve` | staff notifications |
 | `POST` | `/staff/reorder-check` | check all products now and draft purchase orders |
 | `GET` | `/staff/purchase-orders?status=draft` | purchase orders, optionally by status |
 | `POST` | `/staff/purchase-orders/{po}/approve` · `/reject` · `/send` · `/receive` | the manager and storekeeper steps |
@@ -603,7 +643,6 @@ Karachi Mart `+92 345 2201876` (no discount), Madina General Store `+92 312 4478
 | `POST` | `/staff/payments/cancel-unpaid` | run the 24-hour payment deadline now |
 | `GET` / `POST` | `/staff/supplier-invoices` | list supplier bills (due, overdue) / record a supplier's invoice |
 | `POST` | `/staff/supplier-invoices/{id}/approve` · `/reject` · `/pay` | manager approval and recording the payment |
-
 | `POST` | `/staff/dispatch` | assign today's waiting deliveries to riders now |
 | `GET` | `/staff/deliveries` · `/staff/riders` | deliveries by status or date; riders with today's load |
 | `GET` | `/riders/{rider}/deliveries` | a rider's current jobs (for a rider app) |
@@ -623,7 +662,8 @@ POST /chat
   "waiting_for": "confirmation",
   "status": "active",
   "order_number": null,
-  "invoice_number": null
+  "invoice_number": null,
+  "run_id": "3f9c1a2b7d4e"
 }
 ```
 
@@ -635,5 +675,5 @@ POST /chat
 - Phone orders by voice (Vapi)
 - Proof of delivery (a code the shop gives the rider) and live rider location
 - Payment gateway (automatic verification), cash on delivery and credit limits
-- Staff dashboard: orders, stock, conversations, notifications
+- Reports: daily sales, top products, slow payers, rider performance
 - Deployment

@@ -11,7 +11,8 @@ from app.agent.service import OrderAgent, postgres_checkpointer
 from app.api.delivery import riders_router, staff_delivery_router
 from app.api.finance import router as finance_router
 from app.api.staff import router as staff_router
-from app.tools import ConversationBusy
+from app.agent.service import thread_id_for
+from app.tools import ConversationBusy, customer_overview, workflow_trace
 
 
 class ChatRequest(BaseModel):
@@ -26,6 +27,7 @@ class ChatResponse(BaseModel):
     status: Optional[str]
     order_number: Optional[str]
     invoice_number: Optional[str]
+    run_id: Optional[str] = None
 
 
 class ChatMessage(BaseModel):
@@ -75,11 +77,22 @@ def create_app(llm: Optional[OrderLLM] = None) -> FastAPI:
             raise HTTPException(status_code=409, detail="Another message from this number is still being processed.")
         return ChatResponse(thread_id=reply.thread_id, messages=reply.messages, waiting_for=reply.waiting_for,
                             status=reply.status, order_number=reply.order_number,
-                            invoice_number=reply.invoice_number)
+                            invoice_number=reply.invoice_number, run_id=reply.run_id)
 
     @app.get("/conversations/{phone}", response_model=ConversationResponse)
     def conversation(phone: str, limit: int = 50, agent: OrderAgent = Depends(get_agent)) -> ConversationResponse:
         return ConversationResponse(**agent.conversation(phone, limit=min(max(limit, 1), 200)))
+
+    @app.get("/conversations/{phone}/trace")
+    def trace(phone: str, run_id: Optional[str] = None) -> dict:
+        return workflow_trace(thread_id_for(phone), run_id=run_id)
+
+    @app.get("/customers/{phone}")
+    def customer(phone: str) -> dict:
+        overview = customer_overview(phone)
+        if overview is None:
+            raise HTTPException(status_code=404, detail="No registered customer with this phone number.")
+        return overview
 
     return app
 

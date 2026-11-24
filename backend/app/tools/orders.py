@@ -17,8 +17,9 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.db.models import Invoice, Order, OrderDraft, OrderItem, Payment
+from app.db.models import Customer, Delivery, Invoice, Order, OrderDraft, OrderItem, Payment
 from app.db.session import session_scope
+from app.phone import normalize_phone
 from app.tools.base import (
     Abort, ErrorCode, OrderLineIn, OrderLines, PricedLine, Pricing, ToolError, ToolOk, fail, tool,
 )
@@ -434,3 +435,44 @@ def get_customer_profile(p: GetCustomerProfileInput) -> Union[GetCustomerProfile
         preferred_language=language,
         open_orders=open_orders,
     )
+
+
+def customer_overview(phone: str) -> Optional[dict]:
+    try:
+        number = normalize_phone(phone)
+    except ValueError:
+        return None
+    with session_scope() as s:
+        customer = s.scalar(select(Customer).where(Customer.phone == number).options(selectinload(Customer.price_list)))
+        if customer is None:
+            return None
+        orders = list(s.scalars(select(Order).where(Order.customer_id == customer.id)
+                                .options(selectinload(Order.items), selectinload(Order.invoice))
+                                .order_by(Order.id.desc()).limit(50)))
+        rows = []
+        for o in orders:
+            payment = s.scalar(select(Payment).where(Payment.order_id == o.id).order_by(Payment.id.desc()).limit(1))
+            delivery = s.scalar(select(Delivery).where(Delivery.order_id == o.id)
+                                .options(selectinload(Delivery.rider)).order_by(Delivery.id.desc()).limit(1))
+            rows.append({
+                "order_number": o.order_number, "status": o.status, "created_at": o.created_at,
+                "subtotal": o.subtotal, "discount_amount": o.discount_amount, "total": o.total,
+                "invoice_number": o.invoice.invoice_number if o.invoice else None,
+                "payment_due_at": o.payment_due_at, "paid_at": o.paid_at, "delivery_date": o.delivery_date,
+                "cancel_reason": o.cancel_reason,
+                "items": [{"product_id": i.product_id, "name": i.product_name, "qty": i.qty,
+                           "unit_price": i.unit_price, "line_total": i.line_total}
+                          for i in sorted(o.items, key=lambda i: i.id)],
+                "payment": None if payment is None else {"status": payment.status, "method": payment.method,
+                                                         "reference": payment.reference,
+                                                         "rejected_reason": payment.rejected_reason},
+                "delivery": None if delivery is None else {
+                    "status": delivery.status, "attempt": delivery.attempt,
+                    "scheduled_date": delivery.scheduled_date, "failure_reason": delivery.failure_reason,
+                    "rider_name": delivery.rider.name if delivery.rider else None,
+                    "rider_phone": delivery.rider.phone if delivery.rider else None},
+            })
+        return {"customer": {"name": customer.name, "phone": customer.phone, "address": customer.address,
+                             "area": customer.area, "price_category": customer.price_category,
+                             "discount_pct": customer.price_list.discount_pct},
+                "orders": rows}

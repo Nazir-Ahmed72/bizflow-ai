@@ -319,7 +319,41 @@ called **dependency injection of time**, and it's the standard way to test date 
 
 ---
 
-## 13. Testing an LLM app
+## 13. The dashboard: a client of your own API (Streamlit)
+
+**Idea.** The dashboard is just another *client*, like WhatsApp or a rider's phone would be. It only sends HTTP
+requests to FastAPI; it never imports the backend or touches the database. That keeps one source of truth (the
+API and its tools, with all their rules), and proves the API is enough to run the whole business.
+
+**How Streamlit works (the one idea to understand).** A Streamlit page is a Python script that **reruns from top
+to bottom on every click**. There are no callbacks wiring buttons to handlers: `if st.button("Verify"):` is
+`True` only in the rerun caused by that click. Things that must survive a rerun go in `st.session_state` (we keep
+the last `run_id` there). After an action we call `st.rerun()` so the page reloads fresh data from the API.
+
+**In this project** ([dashboard/](../dashboard/)):
+- `app.py`: `st.navigation` with four pages, plus an API health check.
+- `api.py`: one small HTTP helper (`httpx`) that turns error responses into readable messages.
+- `pages/chat.py`: the "behind the scenes" panel reads `GET /conversations/{phone}/trace`. Those rows are the
+  `workflow_logs` written by `@tool`, `LoggedLLM`, `guard()` and `node()` (§6): the same logs you'd use to debug
+  production, shown live.
+
+**Why the dashboard's read endpoints aren't `@tool`s.** Every `@tool` call is logged. A dashboard refreshing
+every few seconds would bury the real activity in noise, so its reads are plain functions in the tools layer
+(still the only code that touches the database).
+
+**Testing a Streamlit page without a browser.** `streamlit.testing.v1.AppTest` runs a page in-process and lets
+you click buttons and read metrics. Combined with a test-branch API server, that checks every page end to end.
+
+**Read.**
+- Streamlit's execution model (reruns): https://docs.streamlit.io/develop/concepts/architecture/fundamentals
+- Session state: https://docs.streamlit.io/develop/concepts/architecture/session-state
+- Multipage apps with `st.navigation`: https://docs.streamlit.io/develop/concepts/multipage-apps/page-and-navigation
+- App testing: https://docs.streamlit.io/develop/concepts/app-testing
+- HTTPX (the HTTP client): https://www.python-httpx.org/quickstart/
+
+---
+
+## 14. Testing an LLM app
 
 **Idea.** You can't test "is the model smart?" with exact assertions, but you *can* test everything around it. The scenario tests use a **scripted fake LLM** that says "for 'yes', call `confirm_pending_order`". Everything after that decision is real code on a real (test) database. A separate live test checks the real model, only when you ask (`RUN_LIVE_LLM=1`), because it costs tokens.
 
